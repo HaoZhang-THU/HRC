@@ -1,6 +1,7 @@
-"""SAGE: safety-shielded, team-consistent training of hard oblique decision-tree
-carriers for cooperative payload transport (Isaac Lab G1 cooperative-transport
-environment).
+"""SAGE: Safety-Aligned Gradient Enforcement for Human-Robot Collaboration.
+
+Safety-shielded, team-consistent training of hard oblique decision-tree carriers
+for cooperative payload transport (Isaac Lab G1 cooperative-transport environment).
 
 Module map (paper section -> file):
     Sec. III-A  affine CBF rows + exact joint QP        safety.py

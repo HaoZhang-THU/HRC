@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "isaac_sage"
 version = "0.1.0"
-description = "SAGE: safety-shielded, team-consistent training of hard oblique decision-tree carriers for G1 cooperative transport in Isaac Lab"
+description = "SAGE: Safety-Aligned Gradient Enforcement for Human-Robot Collaboration (G1 cooperative transport in Isaac Lab)"
 requires-python = "==3.10.*"
 readme = "README.md"
 license = { text = "MIT" }

@@ -1,4 +1,4 @@
-# SAGE: safety-shielded, team-consistent tree policies for G1 cooperative transport
+# SAGE: Safety-Aligned Gradient Enforcement for Human–Robot Collaboration
 
 Reference implementation and training recipe for **SAGE** on an Isaac Lab task in
 which **N = 3** Unitree G1 humanoids carry one rigid board through a 2.2 m tilt
