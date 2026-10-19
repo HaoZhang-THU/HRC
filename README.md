@@ -1,5 +1,9 @@
 # SAGE: Safety-Aligned Gradient Enforcement for Human–Robot Collaboration
 
+[![arXiv](https://img.shields.io/badge/arXiv-2609.21130-b31b1b.svg)](https://arxiv.org/abs/2609.21130)
+[![PDF](https://img.shields.io/badge/Paper-PDF-blue.svg)](https://arxiv.org/pdf/2609.21130)
+[![Project Page](https://img.shields.io/badge/Project-Page-green.svg)](https://yisen03-explosion.github.io/sage/)
+
 Reference implementation and training recipe for **SAGE** on an Isaac Lab task in
 which **N = 3** Unitree G1 humanoids carry one rigid board through a 2.2 m tilt
 gate. Each carrier's high-level policy is a **hard oblique decision tree**. Every
