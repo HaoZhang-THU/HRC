@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "isaac_sage"
+version = "0.1.0"
+description = "SAGE: safety-shielded, team-consistent training of hard oblique decision-tree carriers for G1 cooperative transport in Isaac Lab"
+requires-python = "==3.10.*"
+readme = "README.md"
+license = { text = "MIT" }
+
+[tool.setuptools]
+packages = ["isaac_sage", "isaac_sage.task"]
+
+[tool.setuptools.package-data]
+isaac_sage = ["assets/*.pt", "assets/g1/*.usd", "assets/init/*.pt", "scenes/*.json", "*.sh"]
