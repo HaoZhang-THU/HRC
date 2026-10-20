@@ -136,10 +136,6 @@ All arms share every setting except the three columns below.
    carriers updated after them.
 4. The critic is updated after all carriers.
 
-In the SAIL arm one carrier's proposal centre depends on the other carriers. While
-one carrier is updated, the others are held at their current parameters, so SAIL
-with HAPPO is a sequential approximation, not an exact joint update.
-
 ### Shared recipe (`train.sh`)
 
 | Setting | Value |
