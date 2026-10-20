@@ -127,11 +127,6 @@ All arms share every setting except the three columns below.
 | TALO | `talo` | CBF-QP + TALO | g_TALO (flag not passed) | team-context (`auto`) |
 | SAGE | `sage` | CBF-QP + SAIL + TALO | g_TALO (flag not passed) | team-context (`auto`) |
 
-Two flag rules:
-
-- The TALO arms always update with g_TALO, and the code rejects `--actor_update happo` for them.
-- SAIL needs `--critic joint` explicitly, because `auto` would give it the team-context critic.
-
 **HAPPO update** (Kuba et al., ICLR 2022), as implemented in `trainer.py`:
 
 1. Each iteration draws a random order of the carriers.
