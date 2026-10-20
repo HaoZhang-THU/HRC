@@ -145,7 +145,6 @@ All arms share every setting except the three columns below.
 | Gate temperature τ (straight-through backward pass) | `--tau_init 2.0 --tau_final 0.4 --tau_anneal_start 0.112 --tau_anneal_end 0.36` |
 | Routing | `--hard_finetune_fraction 1.0`: hard routing from the first iteration (forward pass), straight-through gradients through sigmoid(·/τ) (backward pass), and hard routing at deployment. |
 | SAIL κ | `--kappa_init 8 --kappa_final 32`, linear over the whole run |
-| Reward | `--w_heading 0 --w_obstacle 0 --w_collision_contact 0.2`, `--projection_progress --success_mode loose --success_compensation` |
 | Start curriculum | `--start_curriculum_prob 0.7`. The lower bound of mid-path starts anneals from 0.8 to 0.0 over the first 60 % of training. |
 | Partner perturbation | `--partner_noise` |
 | Optimisation | `--actor_lr 1e-4 --critic_lr 5e-5`; PPO 15 epochs × 15 minibatches, `max_grad_norm 0.5`, entropy coefficient 0 (code defaults) |
