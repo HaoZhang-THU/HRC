@@ -1,8 +1,10 @@
 # SAGE: Safety-Aligned Gradient Enforcement for Human–Robot Collaboration
 
-[![arXiv](https://img.shields.io/badge/arXiv-2609.21130-b31b1b.svg)](https://arxiv.org/abs/2609.21130)
-[![PDF](https://img.shields.io/badge/Paper-PDF-blue.svg)](https://arxiv.org/pdf/2609.21130)
-[![Project Page](https://img.shields.io/badge/Project-Page-green.svg)](https://yisen03-explosion.github.io/sage/)
+<p align="center">
+  <a href="https://arxiv.org/abs/2609.21130"><img src="https://img.shields.io/badge/arXiv-2609.21130-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://arxiv.org/pdf/2609.21130"><img src="https://img.shields.io/badge/Paper-PDF-blue.svg" alt="PDF"></a>
+  <a href="https://yisen03-explosion.github.io/sage/"><img src="https://img.shields.io/badge/Project-Page-green.svg" alt="Project Page"></a>
+</p>
 
 <table>
   <tr>
