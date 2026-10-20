@@ -113,9 +113,7 @@ framework.
 
 - **Robots.** N = 3 G1 robots hold a 2.0 m × 1.0 m board. Each robot is driven
   at 50 Hz by the frozen waist-tracking controller (`assets/policy_waist_tracking_g1_23dof.pt`),
-  which follows a body-frame target `[dx, dy, dyaw]`.
-- **Learning carriers.** `robot_0` and `robot_1` stand at ±1.2 m along the board's
-  X axis and learn the 1 Hz high-level command.
+  which follows a body-frame target `[dx, dy, dyaw]` set by the 1 Hz high-level policy.
 - **Observations.** Each carrier observes its own state, the board and waypoint
   window, and 36 synthetic LiDAR rays.
 
@@ -152,16 +150,16 @@ Two flag rules:
 
 **HAPPO update** (Kuba et al., ICLR 2022), as implemented in `trainer.py`:
 
-1. Each iteration draws a random order of the two carriers.
+1. Each iteration draws a random order of the carriers.
 2. The carriers are updated one after another. Each uses its own clipped PPO
    ratio and its own gradient clipping.
 3. The ratios of the carriers already updated multiply the advantage of the
    carriers updated after them.
 4. The critic is updated after all carriers.
 
-In the SAIL arm one carrier's proposal centre depends on the other carrier. While
-one carrier is updated, the other is held at its current parameters, so SAIL with
-HAPPO is a sequential approximation, not an exact joint update.
+In the SAIL arm one carrier's proposal centre depends on the other carriers. While
+one carrier is updated, the others are held at their current parameters, so SAIL
+with HAPPO is a sequential approximation, not an exact joint update.
 
 ### Shared recipe (`train.sh`)
 
