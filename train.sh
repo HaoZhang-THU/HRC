@@ -4,9 +4,10 @@
 #   bash train.sh sage              # one arm: tree | tree_cbf | sail | talo | sage
 #   bash train.sh all               # the five arms in that order
 #   bash train.sh sage --foo bar    # extra train_sage.py flags are appended (changes the recipe)
+#   SCENE=<name> bash train.sh sage # scene file isaac_sage/scenes/<name>.json
 #   DRY_RUN=1 bash train.sh all     # print the commands only
 #
-# Each run writes results/<arm>_seed<seed>_<date>/ (run_args.json, train.log,
+# Each run writes results/<scene>_<arm>_seed<seed>_<date>/ (run_args.json, train.log,
 # tensorboard/, models/) and is restarted from its latest checkpoint if the
 # process dies before the run is finished (isaac_sage/run_resumable.sh).
 set -euo pipefail
@@ -24,6 +25,9 @@ export ISAACLAB_CORE_ROOT="${ISAACLAB_CORE_ROOT:-$ROOT/third_party/IsaacLab}"
     echo "Isaac Lab checkout not found at $ISAACLAB_CORE_ROOT (run install.sh)"; exit 1; }
 export PYTHON="${PYTHON:-python}"
 SEED="${SEED:-1}"
+SCENE="${SCENE:-tilt_gate_2m2}"
+SCENE_JSON="isaac_sage/scenes/${SCENE}.json"
+[ -f "$SCENE_JSON" ] || { echo "scene file not found: $SCENE_JSON" >&2; exit 1; }
 
 # 128 envs x 60 high-level steps = 7680 env-steps per iteration; 200 iterations.
 NUM_ENVS=128
@@ -33,7 +37,7 @@ NUM_ENV_STEPS=$((NUM_ENVS * 60 * ITERATIONS))      # 1,536,000
 COMMON=(
     --seed "$SEED"
     --num_envs "$NUM_ENVS" --num_steps 60 --num_env_steps "$NUM_ENV_STEPS"
-    --scene_json isaac_sage/scenes/tilt_gate_2m2.json
+    --scene_json "$SCENE_JSON"
     --resume isaac_sage/assets/init/phase1_init.pt --activate_lidar
     --tau_init 2.0 --tau_final 0.4 --tau_anneal_start 0.112 --tau_anneal_end 0.36
     --hard_finetune_fraction 1.0
@@ -57,7 +61,7 @@ arm_args() {
 
 run_arm() {
     local arm="$1"; shift
-    local log_dir="results/${arm}_seed${SEED}_$(date +%Y-%m-%d-%H-%M-%S)"
+    local log_dir="results/${SCENE}_${arm}_seed${SEED}_$(date +%Y-%m-%d-%H-%M-%S)"
     # shellcheck disable=SC2046
     local cmd=(--variant "$arm" "${COMMON[@]}" $(arm_args "$arm") "$@")
     echo "[train.sh] $arm -> $log_dir"

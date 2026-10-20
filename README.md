@@ -20,8 +20,8 @@
 </table>
 
 Reference implementation and training recipe for **SAGE** on an Isaac Lab task in
-which **N = 3** Unitree G1 humanoids carry one rigid board through a 2.2 m tilt
-gate. Each carrier's high-level policy is a **hard oblique decision tree**. Every
+which **N = 3** Unitree G1 humanoids carry one rigid board through obstacle
+courses. Each carrier's high-level policy is a **hard oblique decision tree**. Every
 executed command passes through an exact control-barrier QP that covers the whole
 formation. **SAIL** (shield-annealed internalisation) and **TALO** (team-averaged
 Lyapunov policy optimisation) train the trees so that the deployed tree relies on
@@ -41,10 +41,10 @@ conda activate isaac_sage
 export OMNI_KIT_ACCEPT_EULA=YES    # after reading the NVIDIA Omniverse EULA
 bash train.sh sage                 # one arm (200 iterations)
 bash train.sh all                  # tree, tree_cbf, sail, talo, sage, one after another
-bash eval.sh results/sage_seed1_<date>     # deployment evaluation of models/iter_200.pt
+bash eval.sh results/<scene>_sage_seed1_<date>   # deployment evaluation of models/iter_200.pt
 ```
 
-Each run writes `results/<arm>_seed1_<date>/`:
+Each run writes `results/<scene>_<arm>_seed1_<date>/`:
 
 | Path | Contents |
 |---|---|
@@ -97,13 +97,13 @@ isaac_sage/
   isaac_env.py     adapter to the Isaac Lab task
   train_sage.py    training entry point
   eval_sage.py     deployment evaluation entry point
-  scenes.py        generates scenes/tilt_gate_2m2.json
+  scenes.py        generates the scene files in scenes/
   smoke_test.py    CPU checks of the equations and two iterations of every variant (no simulator)
   task/            Isaac Lab task Isaac-G1-CooperativeTransport-Direct-v0 (registered on import)
   assets/g1/g1_29dof_anneal_23dof_palmup.usd     G1 robot (23 actuated DoF)
   assets/policy_waist_tracking_g1_23dof.pt       frozen waist-tracking whole-body controller (TorchScript)
   assets/init/phase1_init.pt                     phase-1 initialisation (see below)
-  scenes/tilt_gate_2m2.json                      training scene
+  scenes/*.json                                  scene files (walls, path, spawn poses)
 ```
 
 `isaac_sage` depends only on PyTorch and Isaac Lab and contains no other learning
@@ -128,18 +128,13 @@ framework.
 - formation width across the direction of travel: about 1.40 m carried lengthwise, about 2.80 m broadside
 - safety-layer margin to walls: 0.10 m
 
-**Training scene: 2.2 m tilt gate** (`scenes/tilt_gate_2m2.json`).
-
-- **Geometry.** A gate 2.2 m wide and 2.1 m deep. Travel is along +Y, and the
-  formation enters with its broad side facing the gate.
-- **Required rotation.** To pass, the formation must tilt its long axis towards
-  the travel direction:
-  - within about 48.5° of it to fit through the opening at all
-  - within about 36.5° of it to keep the 0.10 m margin to both gate walls
-- **Episodes.** Start and goal are drawn from a pool of 512 validated spawn
-  poses. The episode budget is 150 s (150 high-level steps).
-
-Regenerate the scene with `python -m isaac_sage.scenes --png`.
+**Scenes.** Each scene is one JSON file in `isaac_sage/scenes/`: the walls, a
+collision-free reference path, the waypoints the carriers see, a pool of
+validated spawn poses with their paths, and the episode budget. `train.sh` trains
+on the scene named by `SCENE` (`SCENE=<name> bash train.sh sage`); without it,
+it uses the scene the recipe below was run on. `eval.sh` evaluates a run on the
+scene it was trained on. Regenerate the scene files with
+`python -m isaac_sage.scenes --png`.
 
 ## The five arms
 
@@ -176,7 +171,7 @@ HAPPO is a sequential approximation, not an exact joint update.
 | Setting | Value |
 |---|---|
 | Iterations | 200 iterations of 128 parallel envs × 60 high-level steps = 7,680 env-steps each, i.e. `--num_env_steps 1536000`. The τ and κ schedules are fractions of this total, so a run must not be stopped early or lengthened. |
-| Seed and scene | `--seed 1`, `--scene_json isaac_sage/scenes/tilt_gate_2m2.json` |
+| Seed and scene | `--seed 1`, `--scene_json isaac_sage/scenes/<SCENE>.json` |
 | Gate temperature τ (straight-through backward pass) | `--tau_init 2.0 --tau_final 0.4 --tau_anneal_start 0.112 --tau_anneal_end 0.36` |
 | Routing | `--hard_finetune_fraction 1.0`: hard routing from the first iteration (forward pass), straight-through gradients through sigmoid(·/τ) (backward pass), and hard routing at deployment. Because there is no soft → hard switch, split hyperplanes and leaves are trained throughout and the actor learning rate is never rescaled. |
 | SAIL κ | `--kappa_init 8 --kappa_final 32`, linear over the whole run |
