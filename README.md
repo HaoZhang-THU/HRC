@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://arxiv.org/abs/2609.21130"><img src="https://img.shields.io/badge/arXiv-2609.21130-b31b1b.svg" alt="arXiv"></a>
   <a href="https://arxiv.org/pdf/2609.21130"><img src="https://img.shields.io/badge/Paper-PDF-blue.svg" alt="PDF"></a>
-  <a href="https://yisen03-explosion.github.io/sage/"><img src="https://img.shields.io/badge/Project-Page-green.svg" alt="Project Page"></a>
+  <a href="https://yisen03-explosion.github.io/sage/"><img src="https://img.shields.io/badge/Website-Page-green.svg" alt="Website"></a>
 </p>
 
 <table>
