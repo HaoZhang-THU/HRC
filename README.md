@@ -156,8 +156,7 @@ All arms share every setting except the three columns below.
 All five arms continue from the same phase-1 policy:
 `--resume isaac_sage/assets/init/phase1_init.pt --activate_lidar`.
 
-- **Contents.** The file holds the carrier trees, a team-context critic and the
-  observation normaliser. It is an initialisation, not a checkpoint of any arm.
+- **Contents.** The file holds the carrier trees and the observation normaliser. It is an initialisation, not a checkpoint of any arm.
 - **LiDAR channels.** The phase-1 policy saw no LiDAR input. `--activate_lidar`
   zeroes those weights and re-estimates their normalisation; this leaves the
   initial policy unchanged.
