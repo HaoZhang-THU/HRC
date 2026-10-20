@@ -153,20 +153,9 @@ All arms share every setting except the three columns below.
 
 ### Initialisation
 
-All five arms continue from the same phase-1 policy:
-`--resume isaac_sage/assets/init/phase1_init.pt --activate_lidar`.
-
-- **Contents.** The file holds the carrier trees and the observation normaliser. It is an initialisation, not a checkpoint of any arm.
-- **LiDAR channels.** The phase-1 policy saw no LiDAR input. `--activate_lidar`
-  zeroes those weights and re-estimates their normalisation; this leaves the
-  initial policy unchanged.
-- **TALO, SAGE.** The actor updates from iteration 1.
-- **tree, tree_cbf, SAIL.** These use the joint-observation critic, so the critic
-  starts from scratch. The actor is frozen for the first `--critic_warmup_iters 5`
-  iterations.
-
-Training without this file starts from a random tree. That is a different
-experiment from this recipe.
+All five arms continue from the same phase-1 policy
+(`--resume isaac_sage/assets/init/phase1_init.pt --activate_lidar`), trained in an
+open, obstacle-free field for an omnidirectional carrying gait.
 
 ## Checks without a simulator
 
