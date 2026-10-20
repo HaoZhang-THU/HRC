@@ -106,9 +106,6 @@ isaac_sage/
   scenes/*.json                                  scene files (walls, path, spawn poses)
 ```
 
-`isaac_sage` depends only on PyTorch and Isaac Lab and contains no other learning
-framework.
-
 ## Task
 
 - **Robots.** N = 3 G1 robots hold a 2.0 m × 1.0 m board. Each robot is driven
