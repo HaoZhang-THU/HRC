@@ -26,11 +26,8 @@ executed command passes through an exact control-barrier QP that covers the whol
 formation. **SAIL** (shield-annealed internalisation) and **TALO** (team-averaged
 Lyapunov policy optimisation) train the trees so that the deployed tree relies on
 the shield as little as possible, and the separately parameterised carriers
-update as a team.
-
-This repository contains code and the training recipe only. It ships no trained
-checkpoints, results or curves. Every arm below is trained from the same
-initialisation with one command.
+update as a team. Every arm below is trained from the same initialisation with
+one command.
 
 ## Quick start
 
