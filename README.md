@@ -123,13 +123,10 @@ framework.
 - formation width across the direction of travel: about 1.40 m carried lengthwise, about 2.80 m broadside
 - safety-layer margin to walls: 0.10 m
 
-**Scenes.** Each scene is one JSON file in `isaac_sage/scenes/`: the walls, a
-collision-free reference path, the waypoints the carriers see, a pool of
-validated spawn poses with their paths, and the episode budget. `train.sh` trains
-on the scene named by `SCENE` (`SCENE=<name> bash train.sh sage`); without it,
-it uses the scene the recipe below was run on. `eval.sh` evaluates a run on the
-scene it was trained on. Regenerate the scene files with
-`python -m isaac_sage.scenes --png`.
+**Scenes.** The task has nine scenes: Narrow Gate, Needle Gate, Tilt Gate, Double
+Gate, Chicane, S-Shaped Corridor, L-Corridor, U-Shaped Corridor and Maze. Scene
+files are added to `isaac_sage/scenes/` as they are released; choose one with
+`SCENE=<name> bash train.sh sage`.
 
 ## The five arms
 
