@@ -116,9 +116,6 @@ framework.
   which follows a body-frame target `[dx, dy, dyaw]`.
 - **Learning carriers.** `robot_0` and `robot_1` stand at ±1.2 m along the board's
   X axis and learn the 1 Hz high-level command.
-- **Follower.** `robot_2` stands 0.7 m along the board's Y axis. It is tied
-  rigidly to the payload and enters only the safety constraints, as a disc
-  attached to the payload. It is not a decision block.
 - **Observations.** Each carrier observes its own state, the board and waypoint
   window, and 36 synthetic LiDAR rays.
 
