@@ -4,6 +4,19 @@
 [![PDF](https://img.shields.io/badge/Paper-PDF-blue.svg)](https://arxiv.org/pdf/2609.21130)
 [![Project Page](https://img.shields.io/badge/Project-Page-green.svg)](https://yisen03-explosion.github.io/sage/)
 
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/media/scenario1_three_carrier.gif" width="100%"><br>
+      <sub><b>Scenario 1:</b> Three-carrier physical collaboration — two Unitree G1 humanoids + one human partner</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/media/scenario2_confined_transport.gif" width="100%"><br>
+      <sub><b>Scenario 2:</b> Spatially confined transport — octagonal table and human-partner variation</sub>
+    </td>
+  </tr>
+</table>
+
 Reference implementation and training recipe for **SAGE** on an Isaac Lab task in
 which **N = 3** Unitree G1 humanoids carry one rigid board through a 2.2 m tilt
 gate. Each carrier's high-level policy is a **hard oblique decision tree**. Every
