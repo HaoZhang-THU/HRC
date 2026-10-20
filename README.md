@@ -160,8 +160,7 @@ All five arms continue from the same phase-1 policy:
 - **LiDAR channels.** The phase-1 policy saw no LiDAR input. `--activate_lidar`
   zeroes those weights and re-estimates their normalisation; this leaves the
   initial policy unchanged.
-- **TALO, SAGE.** The critic kind matches, so the critic is loaded and the actor
-  updates from iteration 1.
+- **TALO, SAGE.** The actor updates from iteration 1.
 - **tree, tree_cbf, SAIL.** These use the joint-observation critic, so the critic
   starts from scratch. The actor is frozen for the first `--critic_warmup_iters 5`
   iterations.
