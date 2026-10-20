@@ -1,10 +1,17 @@
-# SAGE: Safety-Aligned Gradient Enforcement for Human–Robot Collaboration
+# HRC: Human–Robot Collaboration
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2609.21130"><img src="https://img.shields.io/badge/arXiv-2609.21130-b31b1b.svg" alt="arXiv"></a>
-  <a href="https://arxiv.org/pdf/2609.21130"><img src="https://img.shields.io/badge/Paper-PDF-blue.svg" alt="PDF"></a>
-  <a href="https://yisen03-explosion.github.io/sage/"><img src="https://img.shields.io/badge/Website-Page-green.svg" alt="Website"></a>
-</p>
+**HRC** is the shared codebase for **HALO** and **SAGE**, two complementary
+research works on human–robot collaboration. Built on common simulation and
+control infrastructure, the two papers study stable multi-agent learning and
+safety-aligned policy optimization.
+
+| Paper | Publication | Resources |
+|---|---|---|
+| **HALO: Learning Human-Robot Collaboration via Heterogeneous-Agent Lyapunov Policy Optimization** | ICML 2026 (Oral) | [arXiv](https://arxiv.org/abs/2603.03741) · [PDF](https://arxiv.org/pdf/2603.03741) · [Project](https://haozhang-thu.github.io/HALO/) |
+| **SAGE: Safety-Aligned Gradient Enforcement for Human–Robot Collaboration** | Preprint | [arXiv](https://arxiv.org/abs/2609.21130) · [PDF](https://arxiv.org/pdf/2609.21130) · [Project](https://yisen03-explosion.github.io/sage/) |
+
+The implementation details and training recipe below describe the **SAGE**
+configuration of this shared codebase.
 
 <table>
   <tr>
@@ -179,3 +186,30 @@ description (MIT); see [NOTICE](NOTICE).
 
 - HAPPO: J. G. Kuba et al., *Trust Region Policy Optimisation in Multi-Agent Reinforcement Learning*, ICLR 2022.
 - Isaac Lab: M. Mittal et al., *Isaac Lab: A GPU-Accelerated Simulation Framework for Multi-Modal Robot Learning*, arXiv:2511.04831, 2025.
+
+## Citation
+
+If you use this codebase in your research, please cite the relevant paper(s):
+
+```bibtex
+@inproceedings{zhang2026halo,
+  title     = {Learning Human-Robot Collaboration via Heterogeneous-Agent {Lyapunov} Policy Optimization},
+  author    = {Zhang, Hao and Niu, Yaru and Wang, Yikai and Zhao, Ding and Tseng, Eric H.},
+  booktitle = {Proceedings of the 43rd International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {306},
+  pages     = {157932--157946},
+  year      = {2026},
+  publisher = {PMLR},
+  url       = {https://proceedings.mlr.press/v306/zhang26ep.html}
+}
+
+@article{li2026sage,
+  title   = {{SAGE}: Safety-Aligned Gradient Enforcement for Human--Robot Collaboration},
+  author  = {Li, Yisen and Zhang, Hao and Geng, Ruize and Tseng, Yves and Zhao, Ding and Tseng, H. Eric},
+  journal = {arXiv preprint arXiv:2609.21130},
+  year    = {2026},
+  doi     = {10.48550/arXiv.2609.21130},
+  url     = {https://arxiv.org/abs/2609.21130}
+}
+```
