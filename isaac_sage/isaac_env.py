@@ -13,9 +13,8 @@ max_target_yaw) -- the same box the environment clamps to -- so the
 one-step predictor in ``safety.py`` and the executed command share one scale.
 
 The scene has three robots; the environment's ``possible_agents`` are the
-learning carriers (the remaining robot is a scripted follower rigidly tied to
-the payload, so it enters the safety rows as a payload-attached disc, not as a
-decision block).
+learning carriers; the third robot's command is computed from the payload pose,
+so it enters the safety rows as a disc attached to the payload.
 """
 from __future__ import annotations
 

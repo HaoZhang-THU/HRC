@@ -3,7 +3,7 @@
 Three G1 robots (N = 3) carry a rectangular board along a path.  Each robot is
 driven by a frozen waist-tracking whole-body controller.  The two learning
 carriers (robot_0, robot_1) receive high-level [dx, dy, dyaw] commands at 1 Hz;
-robot_2 is a follower rigidly tied to the payload.
+robot_2's target is computed from the board pose.
 
 Architecture:
   high-level policy (1 Hz) → [dx, dy, dyaw] per carrier → waist-tracking controller (50 Hz) → 23-DOF torques
@@ -100,7 +100,7 @@ G1_DAMPING = {
 
 NUM_ROBOTS = 3
 ALL_ROBOT_IDS = ["robot_0", "robot_1", "robot_2"]  # all robots in scene
-FOLLOWER_ROBOT_IDS = ["robot_2"]  # passive followers (not learning carriers)
+PAYLOAD_TRACKING_ROBOT_IDS = ["robot_2"]  # target computed from the board pose (not a learning carrier)
 NUM_WAYPOINTS = 5  # sliding window of VLM-style path waypoints
 OBS_CORE_PER_FRAME = 49  # psi_task(10) + psi_ego(7) + psi_ptn1(7) + psi_ptn2(7) + psi_obj(18)
 OBS_LIDAR = 36
@@ -522,7 +522,7 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
             raise FileNotFoundError(f"Low-level policy not found: '{policy_path}'.")
         self._ll_policy = torch.jit.load(policy_path, map_location=self.device).eval()
 
-        # Per-robot DOF mappings (all robots including followers)
+        # Per-robot DOF mappings (all robots)
         self._dof_ids = {}
         for agent_id in ALL_ROBOT_IDS:
             ids, _ = self.robots[agent_id].find_joints(G1_23DOF_JOINT_NAMES, preserve_order=True)
@@ -543,7 +543,7 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
         self._locked_mask = torch.zeros(cfg.ll_action_dim, device=self.device, dtype=torch.bool)
         self._locked_mask[LOCKED_DOF_INDICES] = True
 
-        # Per-robot buffers (all robots including followers)
+        # Per-robot buffers (all robots)
         self._ll_actions = {
             aid: torch.zeros(self.num_envs, cfg.ll_action_dim, device=self.device)
             for aid in ALL_ROBOT_IDS
@@ -740,7 +740,7 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
         # Clone environments
         self.scene.clone_environments(copy_from_source=False)
 
-        # Register assets with scene (all robots including followers)
+        # Register assets with scene (all robots)
         for agent_id in ALL_ROBOT_IDS:
             self.scene.articulations[agent_id] = self.robots[agent_id]
         self.scene.rigid_objects["board"] = self._board
@@ -1249,7 +1249,7 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
         """Check termination: any robot falls OR board drops."""
         terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # Check ALL robots for falls (including followers)
+        # Check ALL robots for falls
         gravity_w = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, 3)
         for agent_id in ALL_ROBOT_IDS:
             robot = self.robots[agent_id]
@@ -1292,7 +1292,7 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
         super()._reset_idx(env_ids)
         num_reset = len(env_ids)
 
-        # Reset ALL robots (including followers)
+        # Reset ALL robots
         for agent_id in ALL_ROBOT_IDS:
             robot = self.robots[agent_id]
             default_root_state = robot.data.default_root_state[env_ids].clone()
@@ -1588,7 +1588,7 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
         """Build 83-dim observation for the waist-tracking JIT policy.
 
         For the learning carriers: recomputes live error from world-space target.
-        For follower agents (robot_2): computes target from board's current pose (50Hz).
+        For robot_2: computes target from board's current pose (50Hz).
         """
         robot = self.robots[agent_id]
         dof_ids = self._dof_ids[agent_id]
@@ -1609,8 +1609,8 @@ class G1CooperativeTransportEnv(DirectMARLEnv):
         current_pos = robot.data.root_pos_w[:, :2]
         current_yaw = _get_heading_yaw(root_quat)
 
-        if agent_id in FOLLOWER_ROBOT_IDS:
-            # Follower: target derived from board pose with directional lookahead
+        if agent_id in PAYLOAD_TRACKING_ROBOT_IDS:
+            # robot_2: target derived from board pose with directional lookahead
             # Only apply lookahead when board approaches robot_2 (prevents collision)
             # No lookahead when board moves away (prevents overshooting into board)
             board_xy = self._board.data.root_pos_w[:, :2]

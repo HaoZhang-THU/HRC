@@ -19,7 +19,7 @@ One-step predictor  x_{t+1} = F(x_t) + B(x_t) a_t  (Eq. 11)
         omega = sum_i rho_i x (d_i - v) / sum_i |rho_i|^2 (+ optional dpsi term)
     and any point rigidly attached to the payload at offset rho moves by
         delta q = v + rho_perp * omega  =  P_q(x) a.
-    The follower slot (robot_2) tracks the payload and is treated as a point
+    The third robot (robot_2) tracks the payload and is treated as a point
     attached to it.
 
 Conservative affine rows  C_j(x) a >= c_j(x)  (Eq. 12-16)
@@ -93,7 +93,7 @@ class SafetyState:
     """Batched safety-relevant state x = Phi(s), env-local frame."""
     board_xy: Tensor          # [B, 2]
     board_yaw: Tensor         # [B]
-    robot_xy: Tensor          # [B, R, 2]   every carrier slot (controlled + follower)
+    robot_xy: Tensor          # [B, R, 2]   every robot slot (controlled + payload-tracking)
     robot_yaw: Tensor         # [B, R]
     controlled: Tensor        # [N] long, indices into the R slots that are commanded
     anchors_local: Tensor     # [R, 2] holding anchors in the payload frame
