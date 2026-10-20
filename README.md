@@ -73,13 +73,6 @@ must use exactly this stack. `install.sh` sets it up:
 | Isaac Lab | `isaac-sim/IsaacLab` at commit `3e73d6dd79080fd7632488c061052a6edd52e230` (2026-05-07, `VERSION` 2.3.2), checked out to `third_party/IsaacLab` |
 | Python packages | `requirements.lock.txt` (Python 3.10, torch 2.5.1+cu124) |
 
-Isaac Lab is **not** pip-installed. Its `setup.py` at that commit would upgrade
-torch. Instead, `ISAACLAB_CORE_ROOT` (set by `train.sh` / `eval.sh`) makes the
-`isaaclab*` packages import from the checkout. That commit ships
-`apps/isaacsim_4_5`, so it starts on Isaac Sim 4.5. This combination is not in
-Isaac Lab's official support table, but it is the stack the recipe was run on.
-Do not substitute an official Isaac Lab release.
-
 ## Repository layout
 
 ```
