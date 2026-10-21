@@ -1,17 +1,41 @@
 # HRC: Human–Robot Collaboration
 
-**HRC** is the shared codebase for **HALO** and **SAGE**, two complementary
-research works on human–robot collaboration. Built on common simulation and
-control infrastructure, the two papers study stable multi-agent learning and
-safety-aligned policy optimization.
+**HRC** brings together our work on human–robot collaboration, led by
+**HALO (ICML 2026 Oral)** and complemented by **SAGE**. The two papers share
+the underlying simulation and control codebase.
 
-| Paper | Publication | Resources |
-|---|---|---|
-| **HALO: Learning Human-Robot Collaboration via Heterogeneous-Agent Lyapunov Policy Optimization** | ICML 2026 (Oral) | [arXiv](https://arxiv.org/abs/2603.03741) · [PDF](https://arxiv.org/pdf/2603.03741) · [Project](https://haozhang-thu.github.io/HALO/) |
-| **SAGE: Safety-Aligned Gradient Enforcement for Human–Robot Collaboration** | Preprint | [arXiv](https://arxiv.org/abs/2609.21130) · [PDF](https://arxiv.org/pdf/2609.21130) · [Project](https://yisen03-explosion.github.io/sage/) |
+## HALO · ICML 2026 Oral
 
-The implementation details and training recipe below describe the **SAGE**
-configuration of this shared codebase.
+**Learning Human-Robot Collaboration via Heterogeneous-Agent Lyapunov Policy Optimization**
+
+<p align="center">
+  <a href="https://haozhang-thu.github.io/HALO/"><img src="https://img.shields.io/badge/ICML_2026-Oral-f2be4d.svg" alt="HALO: ICML 2026 Oral"></a>
+  <a href="https://arxiv.org/abs/2603.03741"><img src="https://img.shields.io/badge/arXiv-2603.03741-b31b1b.svg" alt="HALO arXiv"></a>
+  <a href="https://arxiv.org/pdf/2603.03741"><img src="https://img.shields.io/badge/Paper-PDF-blue.svg" alt="HALO paper PDF"></a>
+  <a href="https://haozhang-thu.github.io/HALO/"><img src="https://img.shields.io/badge/Project-HALO-2d9d79.svg" alt="HALO project page"></a>
+</p>
+
+<!-- Preview from HALO/static/videos/final_teaser.mp4, source excerpts 1–5 s,
+     18–22 s and 48–52 s. Source timing and on-video speed labels are retained. -->
+<p align="center">
+  <a href="https://haozhang-thu.github.io/HALO/static/videos/final_teaser.mp4">
+    <img src="docs/media/halo_teaser.gif" width="100%" alt="HALO: real-world human–robot collaboration, from the ICML 2026 Oral project teaser">
+  </a><br>
+  <sub><b>HALO:</b> Real-world human–robot collaboration. Selected excerpts from the original project teaser.</sub><br>
+  <a href="https://haozhang-thu.github.io/HALO/static/videos/final_teaser.mp4">Watch the full HALO teaser</a>
+</p>
+
+HALO uses Lyapunov-based gradient corrections to stabilize learning among
+heterogeneous agents, supporting collaboration between humans and humanoid robots.
+
+### SAGE · Companion work (preprint)
+
+**Safety-Aligned Gradient Enforcement for Human–Robot Collaboration**
+
+[arXiv](https://arxiv.org/abs/2609.21130) · [PDF](https://arxiv.org/pdf/2609.21130) · [Project page](https://yisen03-explosion.github.io/sage/)
+
+<details>
+<summary><b>SAGE demonstrations</b> — two humanoids and a human partner</summary>
 
 <table>
   <tr>
@@ -25,6 +49,11 @@ configuration of this shared codebase.
     </td>
   </tr>
 </table>
+
+</details>
+
+The implementation details and training recipe below describe the **SAGE**
+configuration of this shared codebase.
 
 Reference implementation and training recipe for **SAGE** on an Isaac Lab task in
 which **N = 3** Unitree G1 humanoids carry one rigid board through obstacle
