@@ -34,9 +34,6 @@ heterogeneous agents, supporting collaboration between humans and humanoid robot
 
 [arXiv](https://arxiv.org/abs/2609.21130) · [PDF](https://arxiv.org/pdf/2609.21130) · [Project page](https://yisen03-explosion.github.io/sage/)
 
-<details>
-<summary><b>SAGE demonstrations</b> — two humanoids and a human partner</summary>
-
 <table>
   <tr>
     <td align="center" width="50%">
@@ -50,7 +47,17 @@ heterogeneous agents, supporting collaboration between humans and humanoid robot
   </tr>
 </table>
 
-</details>
+<!-- SAGE simulation preview from the project page's Figure 6:
+     https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4.
+     Full source sequence; playback speed and the source's 10X label are retained. -->
+<p align="center">
+  <a href="https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4">
+    <img src="docs/media/sage_simulation.gif" width="720" alt="SAGE simulation: cooperative board transport through an Isaac Lab maze, with trajectory and decision-tree overlays">
+  </a><br>
+  <sub><b>SAGE simulation:</b> Cooperative transport in the Isaac Lab Maze, with trajectory and hard-tree decision traces. The source video is shown at 10× speed.</sub><br>
+  <a href="https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4">Watch the full Maze evaluation</a> ·
+  <a href="https://yisen03-explosion.github.io/sage/static/videos/sim_environments.mp4">More simulation environments</a>
+</p>
 
 The implementation details and training recipe below describe the **SAGE**
 configuration of this shared codebase.
