@@ -1,47 +1,4 @@
 #!/usr/bin/env python3
-"""Deterministic deployment evaluation of a SAGE-family checkpoint (Algorithm 2).
-
-Each of ``--num_episodes`` parallel environments contributes its FIRST finished
-episode (no episode-length bias).  At every high-level step the deployed hard
-tree produces a_nom(o) (Eq. 25); with the shield on the executed command is
-a_exec = Q_CBF(x, a_nom) (Eq. 22), with it off a_exec = a_nom.  In both modes
-the rows are built and Q_CBF(x, a_nom) is solved, so the shield-dependence
-diagnostics are comparable across every arm, including the unshielded tree.
-
-Per episode
-    task      success (run's success_mode: loose = final path point reached, tight = arrive
-              and hold at the goal pose; both are reported), completion = wp / (#wp),
-              collision high-level steps (payload OBB + robot discs vs walls),
-              drop (payload z < board_drop_height), fallen (any robot), timeout,
-              payload tilt / roll / pitch
-    safety    pviol_nominal       fraction of steps where a_nom violates >= 1 row
-              pviol_<family>      same, per row family (collision / grasp / rotation / workspace)
-              intervention_rate   fraction of steps with ||a_exec - a_nom|| > 1e-4
-              correction          mean ||a_exec - a_nom||
-              nominal_correction  mean ||Q_CBF(x, a_nom) - a_nom||   (shield-dependence of the tree)
-              qp_infeasible       fraction of steps whose QP residual exceeds qp_tolerance
-              rows_active         mean number of active rows at the QP solution
-              min_h               smallest barrier value seen in the episode
-Per run
-    leaf occupancy of every carrier tree (fraction of steps routed to each leaf)
-
-Usage
-    python -m isaac_sage.eval_sage --checkpoint <run>/best_model.pt --num_episodes 30 --headless
-    python -m isaac_sage.eval_sage --checkpoint <ckpt> --shield off ...        # nominal tree only
-    python -m isaac_sage.eval_sage --checkpoint <ckpt> --scene_json scene.json # custom scene
-
-Environment toggles (``--mask_lidar`` etc.) are read from ``run_args.json``
-written by ``train_sage.py`` next to the checkpoint, so the evaluation
-environment matches the training one; explicit flags override it.
-
-Scene JSON format (env-local metres)
-    {"name": "...",
-     "obstacle_specs": [[[sx, sy, sz], [cx, cy, cz]], ...],   # box size, box centre
-     "path_waypoints": [[x, y], ...],
-     "start_xy": [x, y],
-     "env_spacing": 20.0,              # optional
-     "episode_length_s": 300.0}        # optional
-"""
 from __future__ import annotations
 
 import argparse
@@ -55,15 +12,15 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from isaac_sage.isaac_env import setup_isaaclab_path  # noqa: E402
+from isaac_sage.isaac_env import setup_isaaclab_path
 
 setup_isaaclab_path()
 
-from isaaclab.app import AppLauncher  # noqa: E402
+from isaaclab.app import AppLauncher
 
-from isaac_sage.isaac_env import TASK_OPTIONS  # noqa: E402
+from isaac_sage.isaac_env import TASK_OPTIONS
 
-H_CAP = 5.0   # reported min_h when no row is active (rows beyond activation_distance are dropped)
+H_CAP = 5.0
 ENV_TOGGLES = ("mask_lidar", "no_obstacles", "no_fixed_path", "target_radius", "curriculum",
                "w_heading", "w_obstacle", "gait_frequency", "g1_usd_path", "low_level_policy_path") + TASK_OPTIONS
 
@@ -111,32 +68,30 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import gymnasium as gym  # noqa: E402
-import isaaclab  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
+import gymnasium as gym
+import isaaclab
+import numpy as np
+import torch
 
-import isaaclab_tasks  # noqa: F401, E402
+import isaaclab_tasks
 
 print(f"[SAGE] isaaclab from {isaaclab.__file__}")
-from isaaclab.utils.math import quat_rotate_inverse  # noqa: E402
-from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
+from isaaclab.utils.math import quat_rotate_inverse
+from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
-from isaac_sage.isaac_env import (  # noqa: E402
+from isaac_sage.isaac_env import (
     IsaacCoopTransportAdapter, apply_task_options, configure_task_cfg, episode_flags, randomize_spawn,
     register_task)
-from isaac_sage.safety import FAMILY_NAMES, FormationSafetyModel, SafetyConfig  # noqa: E402
-from isaac_sage.trainer import RunningMeanStd, deploy_action  # noqa: E402
-from isaac_sage.tree_policy import TeamActor  # noqa: E402
+from isaac_sage.safety import FAMILY_NAMES, FormationSafetyModel, SafetyConfig
+from isaac_sage.trainer import RunningMeanStd, deploy_action
+from isaac_sage.tree_policy import TeamActor
 
 register_task()
-from isaac_sage.task.cooperative_transport_env import (  # noqa: E402
+from isaac_sage.task.cooperative_transport_env import (
     ALL_ROBOT_IDS, BOARD_LENGTH, BOARD_THICKNESS, BOARD_WIDTH, _transform_points)
 
 
-# ---------------------------------------------------------------------- #
 def _resolve_env_toggles() -> dict:
-    """Training toggles from run_args.json, overridden by explicit CLI flags."""
     toggles: dict = {}
     cands = [Path(args_cli.run_args)] if args_cli.run_args else [
         Path(args_cli.checkpoint).resolve().parent / "run_args.json",
@@ -197,7 +152,6 @@ def _configure_env_cfg(cfg, toggles: dict, scene: dict | None):
 
 @torch.no_grad()
 def soft_action(actor, safety, obs_norm, obs_raw, state, tau: float):
-    """deploy_action with the soft-routing nominal (most probable leaf reported)."""
     obs = obs_norm.normalize(obs_raw)
     acts, leaves = [], []
     for i, a in enumerate(actor.actors):
@@ -229,7 +183,6 @@ def _load_checkpoint(path: str, adapter, device):
     return actor, obs_norm, FormationSafetyModel(safety_cfg), cfg
 
 
-# ---------------------------------------------------------------------- #
 def _board_tilt_m(env) -> np.ndarray:
     corners = torch.tensor([[sx * BOARD_LENGTH / 2, sy * BOARD_WIDTH / 2, BOARD_THICKNESS / 2]
                             for sx in (1, -1) for sy in (1, -1)], device=env.device, dtype=torch.float32)
@@ -269,8 +222,6 @@ def _fail_reason(row: dict) -> str:
 
 
 class EpisodeStats:
-    """Per-env accumulators for the running episode; flushed on reset."""
-
     PHYS = ("col_steps", "tilt_sum", "tilt_max", "roll_max", "pitch_max", "n_hl")
     SAFE = ("n_safe", "pviol", "interv", "corr", "nomcorr", "infeas", "active") + tuple(
         f"pviol_{f}" for f in FAMILY_NAMES)
@@ -292,7 +243,6 @@ class EpisodeStats:
         self.dropped[i] = self.fallen[i] = False
 
 
-# ---------------------------------------------------------------------- #
 def main():
     toggles = _resolve_env_toggles()
     scene = json.loads(Path(args_cli.scene_json).read_text()) if args_cli.scene_json else None
@@ -356,7 +306,7 @@ def main():
     def patched_reset_idx(env_ids):
         if recording:
             ids = env_ids.tolist() if torch.is_tensor(env_ids) else list(env_ids)
-            acc_phys(ids)   # terminal frame is still live before the env is re-initialised
+            acc_phys(ids)
             succ_flag, loose_flag = episode_flags(env)
             for i in ids:
                 steps = int(env.episode_length_buf[i].item())
@@ -511,5 +461,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    sys.stdout.flush()   # simulation_app.close() exits the process without flushing
+    sys.stdout.flush()
     simulation_app.close()

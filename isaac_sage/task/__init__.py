@@ -1,10 +1,3 @@
-"""G1 cooperative-transport task (three G1 robots carrying one board).
-
-Importing this package registers ``Isaac-G1-CooperativeTransport-Direct-v0`` with
-gymnasium.  It imports Isaac Lab, so import it only after the Isaac Sim app has
-been launched (``isaac_env.register_task`` does this).
-"""
-
 import gymnasium as gym
 
 TASK_ID = "Isaac-G1-CooperativeTransport-Direct-v0"

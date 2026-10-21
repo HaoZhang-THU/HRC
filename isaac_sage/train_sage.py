@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Train SAGE (or an ablation arm) on the Isaac Lab G1 cooperative-transport task.
-
-    python -m isaac_sage.train_sage --variant sage --headless ...
-    python -m isaac_sage.train_sage --variant tree_cbf ...     # exact QP only
-    python -m isaac_sage.train_sage --variant sail ...         # + SAIL
-    python -m isaac_sage.train_sage --variant talo ...         # + TALO
-    python -m isaac_sage.train_sage --variant tree ...         # unshielded tree
-
-The full recipe of every arm is in train.sh at the repository root.  Run inside
-the python environment of install.sh; ISAACLAB_CORE_ROOT names the pinned Isaac
-Lab checkout (see README).
-"""
 from __future__ import annotations
 
 import argparse
@@ -23,11 +11,11 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from isaac_sage.isaac_env import setup_isaaclab_path  # noqa: E402
+from isaac_sage.isaac_env import setup_isaaclab_path
 
 setup_isaaclab_path()
 
-from isaaclab.app import AppLauncher  # noqa: E402
+from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="SAGE on G1 CooperativeTransport (Isaac Lab).")
 parser.add_argument("--task", type=str, default="Isaac-G1-CooperativeTransport-Direct-v0")
@@ -48,7 +36,6 @@ parser.add_argument("--resume_continue", action="store_true",
                          "pass the original --log_dir so curves continue in place.")
 parser.add_argument("--stall_timeout_s", type=float, default=900.0,
                     help="Dump all Python thread stacks to the log if one iteration exceeds this (0 = off).")
-# tree / schedules
 parser.add_argument("--tree_depth", type=int, default=4)
 parser.add_argument("--actor_lr", type=float, default=1e-4)
 parser.add_argument("--critic_lr", type=float, default=5e-5)
@@ -78,7 +65,6 @@ parser.add_argument("--actor_update", type=str, default="auto", choices=["auto",
                          "joint: one clipped joint-ratio step (g_team).  TALO arms always use g_TALO.")
 parser.add_argument("--critic_warmup_iters", type=int, default=5,
                     help="Critic-only iterations when a warm-started actor gets a fresh critic.")
-# safety model
 parser.add_argument("--obstacle_margin", type=float, default=0.10)
 parser.add_argument("--activation_distance", type=float, default=1.0)
 parser.add_argument("--eta", type=float, default=1.0)
@@ -86,7 +72,6 @@ parser.add_argument("--no_curvature_margin", action="store_true")
 parser.add_argument("--no_grasp_rows", action="store_true")
 parser.add_argument("--no_rotation_rows", action="store_true")
 parser.add_argument("--max_rows", type=int, default=32)
-# env toggles (same as the task's training script)
 parser.add_argument("--mask_lidar", action="store_true", default=False)
 parser.add_argument("--activate_lidar", action="store_true", default=False,
                     help="Warm start from a policy trained with --mask_lidar: zero its never-trained LiDAR "
@@ -139,18 +124,18 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import gymnasium as gym  # noqa: E402
-import isaaclab  # noqa: E402
-import torch  # noqa: E402
+import gymnasium as gym
+import isaaclab
+import torch
 
-import isaaclab_tasks  # noqa: F401, E402
-from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
+import isaaclab_tasks
+from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
-from isaac_sage.isaac_env import (  # noqa: E402
+from isaac_sage.isaac_env import (
     TASK_OPTIONS, IsaacCoopTransportAdapter, apply_task_options, configure_task_cfg, randomize_spawn,
     register_task, ungate_progress)
-from isaac_sage.safety import SafetyConfig  # noqa: E402
-from isaac_sage.trainer import SAGEConfig, train  # noqa: E402
+from isaac_sage.safety import SafetyConfig
+from isaac_sage.trainer import SAGEConfig, train
 
 register_task()
 
@@ -234,7 +219,6 @@ def main():
     if args_cli.activate_lidar:
         if args_cli.mask_lidar:
             raise ValueError("--activate_lidar and --mask_lidar are mutually exclusive")
-        # per-carrier obs = [core(c), lidar(R), core history(2c)]
         rays = int(env_cfg.lidar_num_rays)
         core = (adapter.obs_dim_per - rays) // 3
         activate_dims = list(range(core, core + rays))
@@ -279,5 +263,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    sys.stdout.flush()   # simulation_app.close() exits the process without flushing
+    sys.stdout.flush()
     simulation_app.close()

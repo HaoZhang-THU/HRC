@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""CPU smoke test for the SAGE reference implementation (no simulator needed).
-
-    python -m isaac_sage.smoke_test
-
-Checks, each tied to a paper statement:
-  1. affine rows are satisfied by the zero action whenever h >= 0 (Eq. 10, c = -eta h)
-  2. exact QP output satisfies every active row and is idempotent on feasible inputs (Eq. 18)
-  3. fixed (measured) block is untouched by the partner-aware QP (Eq. 19)
-  4. SAIL vs exact QP sensitivity for one isolated active row:
-        d a_bar / d a_ST along the row normal = 1/(1+kappa)  (Eq. 29),  exact QP = 0 (Eq. 28)
-  5. hard-forward ST tree equals the deployed hard routing; gates receive gradients (Eq. 23-26)
-  6. TALO field satisfies the linearised descent condition grad W^T g + sigma W <= 0 (Eq. 41)
-  7. two training iterations of every variant on a planar kinematic stand-in environment
-"""
 from __future__ import annotations
 
 import math
@@ -23,21 +9,17 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from isaac_sage.safety import FormationSafetyModel, RowSet, SafetyConfig, SafetyState, rot2  # noqa: E402
-from isaac_sage.sail import sail_penalty_map  # noqa: E402
-from isaac_sage.talo import talo_update_field  # noqa: E402
-from isaac_sage.trainer import SAGEConfig, SAGETrainer  # noqa: E402
-from isaac_sage.tree_policy import TeamActor  # noqa: E402
+from isaac_sage.safety import FormationSafetyModel, RowSet, SafetyConfig, SafetyState, rot2
+from isaac_sage.sail import sail_penalty_map
+from isaac_sage.talo import talo_update_field
+from isaac_sage.trainer import SAGEConfig, SAGETrainer
+from isaac_sage.tree_policy import TeamActor
 
 torch.set_default_dtype(torch.float32)
 DEV = torch.device("cpu")
 
 
 class PlanarFormationEnv:
-    """Kinematic stand-in with the Isaac task's geometry and action semantics:
-    3 robots around a 2.0 x 1.0 board, 2 controlled carriers at the short edges,
-    body-frame [dx, dy, dyaw] commands scaled by (0.2, 0.2, 0.3), env-local wall boxes."""
-
     def __init__(self, num_envs=16, obs_dim_per=12, seed=0):
         g = torch.Generator().manual_seed(seed)
         self.g = g
@@ -46,7 +28,6 @@ class PlanarFormationEnv:
         self.action_scale = torch.tensor([0.2, 0.2, 0.3])
         self.anchors_local = torch.tensor([[1.2, 0.0], [-1.2, 0.0], [0.0, 0.7]])
         self.controlled = torch.tensor([0, 1])
-        # corridor walls y = +-1.2 .. and a pillar ahead
         self.aabbs = torch.tensor([[-3.0, 6.0, 1.3, 1.8], [-3.0, 6.0, -1.8, -1.3], [2.5, 3.0, -0.4, 0.4]])
         self.goal = torch.tensor([5.0, 0.0])
         self.t = 0
@@ -114,13 +95,11 @@ def main():
     da = rows.C.shape[-1]
     print(f"rows: K={rows.C.shape[1]} present/env={rows.mask.sum(1).mean():.1f} min h={rows.h[rows.mask > 0].min():.3f}")
 
-    # 1. zero action feasible when h >= 0
     zero = torch.zeros(env.num_envs, da)
     check(bool((rows.margins(zero) >= -1e-6).all()), "zero action satisfies every row (h >= 0 => c <= 0)")
 
-    # 2. exact QP: feasibility + idempotence
     a = torch.rand(env.num_envs, da) * 2 - 1
-    a[:, 0] = -1.0  # push carrier 0 hard toward the board along its body x -> grasp rows bite
+    a[:, 0] = -1.0
     out, info = model.exact_projection(a, rows)
     check(bool(info["feasible"].all()) and float(rows.margins(out).min()) > -model.cfg.qp_tolerance,
           f"projected action satisfies rows (min residual {float(rows.margins(out).min()):+.4f})")
@@ -128,13 +107,11 @@ def main():
     check(float((out2 - out).abs().max()) < 1e-3, "projection is idempotent on feasible inputs")
     check(float((out - a).norm(dim=-1).mean()) > 0, "at least one input was corrected")
 
-    # 3. fixed human block
     fixed = torch.zeros(da, dtype=torch.bool)
     fixed[3:6] = True
     out_h, _ = model.exact_projection(a, rows, fixed=fixed)
     check(bool(torch.allclose(out_h[:, 3:6], a[:, 3:6])), "measured partner block held fixed (Eq. 19)")
 
-    # 4. SAIL vs exact QP sensitivity (Eq. 28 / 29) with one isolated active row  a_0 >= 0.5
     kappa = 8.0
     C = torch.zeros(1, 1, da); C[0, 0, 0] = 1.0
     c = torch.full((1, 1), 0.5)
@@ -151,7 +128,6 @@ def main():
     a_big = sail_penalty_map(torch.zeros(1, da), one_row, 1e4, newton_steps=8, damping=1.0)
     check(abs(float(a_big[0, 0]) - 0.5) < 1e-3, "kappa -> inf recovers the exact projection")
 
-    # 5. tree: hard forward == deployed routing, gates get gradient
     actor = TeamActor(env.obs_dim_per, 3, 2, depth=3)
     o = torch.randn(32, 2 * env.obs_dim_per)
     a_hard, _ = actor.nominal(o)
@@ -201,7 +177,6 @@ def main():
           and abs(sr.opt_a.param_groups[0]["lr"] - 0.5 * lr0) < 1e-12,
           "resume in hard phase re-freezes routing without scaling lr twice")
 
-    # 6. TALO descent condition
     p = [torch.nn.Parameter(torch.randn(5)), torch.nn.Parameter(torch.randn(3))]
     L_ind = [(p[0] ** 2).sum() + torch.sin(p[0]).sum(), (p[1] ** 3).sum()]
     L_team = (p[0] ** 2).sum() * 1.3 + (p[1] ** 2).sum() + (p[0].sum() * p[1].sum())
@@ -218,7 +193,6 @@ def main():
     check(stats0["talo_lambda"] == 0.0 and all(torch.allclose(f, g) for f, g in zip(field0, g_team0)),
           "TALO disabled returns g_team")
 
-    # 7. training iterations for every variant
     for variant in ("tree", "tree_cbf", "sail", "talo", "sage"):
         env = PlanarFormationEnv()
         cfg = SAGEConfig(variant=variant, tree_depth=3, num_steps=20, ppo_epochs=2, num_minibatches=4,
@@ -234,14 +208,12 @@ def main():
         if variant == "sage":
             torch.save(tr.checkpoint(), "/tmp/_sage_team_critic_ck.pt")
 
-    # 8. plain critic arm warm-started from a team-context checkpoint: actor loaded,
-    #    critic fresh, actor frozen during the critic warm-up
     from isaac_sage.critic import JointCritic
     cfg = SAGEConfig(variant="tree_cbf", tree_depth=3, num_steps=20, ppo_epochs=2, num_minibatches=4,
                      critic_warmup_iters=2, safety=SafetyConfig(activation_distance=3.0, max_rows=24))
     tj = SAGETrainer(PlanarFormationEnv(), cfg, DEV)
     tj.load("/tmp/_sage_team_critic_ck.pt")
-    snap = lambda: torch.cat([p.detach().flatten().clone() for p in tj.actor.parameters()])  # noqa: E731
+    snap = lambda: torch.cat([p.detach().flatten().clone() for p in tj.actor.parameters()])
     moved, vloss = [], []
     for it in range(3):
         before = snap()
@@ -259,7 +231,6 @@ def main():
     tr2.load("/tmp/_tree_cbf_joint_ck.pt", restore_progress=True)
     check(tr2._critic_warmup_left == 0 and torch.equal(tr2.value_norm.running_mean, tj.value_norm.running_mean),
           "resume restores the joint critic and ValueNorm without a second warm-up")
-    # 9. activating never-trained input channels keeps the deployed policy and critic
     from isaac_sage.trainer import RunningMeanStd
     ta = SAGETrainer(PlanarFormationEnv(), SAGEConfig(variant="sage", tree_depth=3, num_steps=10), DEV)
     dims = [0, 1]

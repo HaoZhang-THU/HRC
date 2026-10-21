@@ -1,34 +1,3 @@
-"""Hard oblique decision-tree nominal actors and bounded proposal policies
-(paper Sec. III-B and Eq. 30-31).
-
-Nominal actor  mu_theta  (Eq. 23-25)
-    internal node k:  g_k(o) = 1[w_k^T o > b_k],  ||w_k||_2 = 1
-    leaf l:           a_raw_l(o) = K_l o + beta_l
-    a_nom(o) = c_a + s_a * tanh(a_raw_{l*(o)}(o)),  here c_a = 0, s_a = 1
-    (actions are normalised to [-1, 1]^3; the environment adapter applies the
-    physical scale).
-
-Routing during training  (Eq. 26 and the tau_n schedule of Alg. 1)
-    soft phase: g_k = sigmoid((w_k^T o - b_k) / tau), the nominal action is the
-        path-probability mixture of the leaf controllers;
-    hard phase (final fraction of training): straight-through gates -- the
-        forward pass uses the hard gate, the backward pass the same sigmoid
-        surrogate, so the rollout nominal action follows the deployed
-        hard-routing semantics.
-    The path indicator is the product of g_k on right branches and 1 - g_k on
-    left branches in both phases.
-
-Structure regulariser  R(theta_i)
-    split-weight entropy (sparse, near-axis-aligned splits) + gate entropy
-    (decisive routing) + leaf-usage KL to uniform (no dead leaves); weighted by
-    lambda_tree and subtracted from every surrogate of the carrier's block.
-
-Proposal policy  pi_theta_i  (Eq. 30)
-    tanh-squashed Gaussian centred on the (SAIL-adjusted) proposal centre
-    a_bar_i: fixed support [-1, 1]^3 and positive density in its interior, so
-    the PPO ratio at stored proposals is well defined.  The exploration scale
-    (log_std) belongs to the actor parameter block theta_i.
-"""
 from __future__ import annotations
 
 import math
@@ -57,8 +26,6 @@ class HardObliqueTree(nn.Module):
         return F.normalize(self.split_w, dim=-1, eps=1e-8)
 
     def gates(self, obs: Tensor, tau: float, hard: bool = True) -> Tensor:
-        """Soft gates sigmoid((w^T o - b)/tau), or g_k^ST (Eq. 26) when ``hard``:
-        hard value forward, the same sigmoid backward."""
         v = obs @ self.unit_splits().t() - self.split_b
         soft = torch.sigmoid(v / tau)
         if not hard:
@@ -69,7 +36,6 @@ class HardObliqueTree(nn.Module):
         return self.gates(obs, tau, hard=True)
 
     def path_indicator(self, gates: Tensor) -> Tensor:
-        """[B, L] product of g^ST (right) / 1 - g^ST (left) along each root-to-leaf path."""
         B = gates.shape[0]
         ind = torch.ones(B, 1, dtype=gates.dtype, device=gates.device)
         for level in range(self.depth):
@@ -79,19 +45,15 @@ class HardObliqueTree(nn.Module):
         return ind
 
     def leaf_raw(self, obs: Tensor) -> Tensor:
-        """a_raw_l(o) for every leaf: [B, L, da] (Eq. 24)."""
         return torch.einsum("bd,lad->bla", obs, self.leaf_K) + self.leaf_beta
 
     def forward(self, obs: Tensor, tau: float, hard: bool = True) -> tuple[Tensor, dict]:
-        """Training-time nominal action in [-1, 1]^da: soft path mixture, or the
-        hard-forward ST action mu^ST_{theta,tau}(o) when ``hard`` (one-hot forward)."""
         g = self.gates(obs, tau, hard)
         ind = self.path_indicator(g)
         a_raw = (ind.unsqueeze(-1) * self.leaf_raw(obs)).sum(dim=1)
         return torch.tanh(a_raw), {"gates": g, "leaf_probs": ind, "leaf": ind.argmax(dim=1)}
 
     def regularizer(self, info: dict, eps: float = 1e-8) -> dict[str, Tensor]:
-        """R(theta_i) terms on the gates / path probabilities of one forward pass."""
         w = self.unit_splits().abs()
         w = w / (w.sum(dim=-1, keepdim=True) + eps)
         feature_entropy = -(w * torch.log(w + eps)).sum(dim=-1).mean()
@@ -104,7 +66,6 @@ class HardObliqueTree(nn.Module):
 
     @torch.no_grad()
     def route(self, obs: Tensor) -> Tensor:
-        """Deployed hard routing (Eq. 23): leaf index per observation."""
         v = obs @ self.unit_splits().t()
         node = torch.zeros(obs.shape[0], dtype=torch.long, device=obs.device)
         for _ in range(self.depth):
@@ -115,7 +76,6 @@ class HardObliqueTree(nn.Module):
 
     @torch.no_grad()
     def nominal(self, obs: Tensor) -> tuple[Tensor, Tensor]:
-        """Deployed deterministic nominal action (Eq. 25) and leaf index."""
         leaf = self.route(obs)
         a_raw = torch.bmm(self.leaf_K[leaf], obs.unsqueeze(-1)).squeeze(-1) + self.leaf_beta[leaf]
         return torch.tanh(a_raw), leaf
@@ -139,8 +99,6 @@ class HardObliqueTree(nn.Module):
 
 
 class TanhNormal:
-    """Gaussian in pre-tanh space squashed to (-1, 1): the bounded proposal family of Eq. 30."""
-
     def __init__(self, pre_mean: Tensor, std: Tensor):
         self.base = torch.distributions.Normal(pre_mean, std)
 
@@ -157,8 +115,6 @@ class TanhNormal:
 
 
 class CarrierActor(nn.Module):
-    """One carrier's parameter block theta_i: hard tree + exploration log-std."""
-
     def __init__(self, obs_dim: int, act_dim: int, depth: int = 4, log_std_init: float = -0.5):
         super().__init__()
         self.tree = HardObliqueTree(obs_dim, act_dim, depth)
@@ -168,15 +124,11 @@ class CarrierActor(nn.Module):
         return self.log_std.clamp(LOG_STD_MIN, LOG_STD_MAX).exp()
 
     def proposal(self, a_bar_i: Tensor) -> TanhNormal:
-        """pi_theta_i( . | x, o ; a_bar_i): centred on the proposal centre block."""
         pre = torch.atanh(a_bar_i.clamp(-ATANH_CLAMP, ATANH_CLAMP))
         return TanhNormal(pre, self.std().expand_as(pre))
 
 
 class TeamActor(nn.Module):
-    """N independently parameterised carrier actors; observations / actions are
-    concatenated over carriers (no parameter sharing, Eq. 2)."""
-
     def __init__(self, obs_dim_per: int, act_dim_per: int, n_agents: int, depth: int = 4,
                  log_std_init: float = -0.5):
         super().__init__()
@@ -194,10 +146,6 @@ class TeamActor(nn.Module):
 
     def nominal_st(self, obs: Tensor, tau: float, detach_except: Optional[int] = None,
                    hard: bool = True, return_reg: bool = False):
-        """Stacked training-time nominal a^ST (Sec. III-C).  With ``detach_except=i``
-        every partner branch is detached before the SAIL map, as required by the
-        independent surrogate L_i (Eq. 37).  ``return_reg`` also returns the
-        per-carrier regulariser R(theta_i) (sum of its terms) as a list."""
         out, regs = [], []
         for i, actor in enumerate(self.actors):
             a_i, info = actor.tree(self.obs_i(obs, i), tau, hard)
@@ -210,7 +158,6 @@ class TeamActor(nn.Module):
         return (a, regs) if return_reg else a
 
     def sample_proposals(self, a_bar: Tensor) -> tuple[Tensor, Tensor]:
-        """a_prop ~ prod_i pi_theta_i (Eq. 31); returns [B, da] and per-carrier log-probs [B, N]."""
         acts, lps = [], []
         for i, actor in enumerate(self.actors):
             dist = actor.proposal(self.act_i(a_bar, i))
@@ -228,7 +175,6 @@ class TeamActor(nn.Module):
 
     @torch.no_grad()
     def nominal(self, obs: Tensor) -> tuple[Tensor, Tensor]:
-        """Deployed stacked a_nom(o) (Eq. 21/25) and per-carrier leaf indices [B, N]."""
         acts, leaves = [], []
         for i, actor in enumerate(self.actors):
             a_i, l_i = actor.tree.nominal(self.obs_i(obs, i))

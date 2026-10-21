@@ -1,17 +1,3 @@
-"""Training scene for the G1 cooperative-transport task (``--scene_json`` format).
-
-The scene has static walls (env-local AABBs), a collision-free reference path,
-the waypoints the policy sees and a pool of randomised spawn poses with their
-paths.
-
-    python -m isaac_sage.scenes                  # validate, print, write JSON
-    python -m isaac_sage.scenes --png            # also render a check image
-
-Footprint model (same as the environment's collision check): the 2.0 x 1.0 m
-board as an oriented box with board-X trailing the travel direction, plus one
-0.2 m disc per robot (robot_0 / robot_1 1.2 m along board-X, robot_2 0.7 m along
-board-Y).
-"""
 from __future__ import annotations
 
 import argparse
@@ -24,7 +10,7 @@ import numpy as np
 BOARD_LENGTH, BOARD_WIDTH = 2.0, 1.0
 ROBOT_OFFSET, ROBOT_R = 0.20, 0.20
 WALL_H = 0.71
-SEC_PER_M = 18.0          # time budget per metre of reference path
+SEC_PER_M = 18.0
 
 
 def box(x0: float, x1: float, y0: float, y1: float, h: float = WALL_H):
@@ -33,9 +19,6 @@ def box(x0: float, x1: float, y0: float, y1: float, h: float = WALL_H):
 
 
 def resample(vertices, spacing: float, keep_vertices: bool) -> list[tuple[float, float]]:
-    """Points every ``spacing`` metres of arc length.  ``keep_vertices`` keeps every
-    corner of the polyline (dense reference); otherwise only the end points are
-    guaranteed and corners are cut."""
     v = np.asarray(vertices, dtype=float)
     if keep_vertices:
         out = []
@@ -67,7 +50,6 @@ def _board_corners(cx, cy, h):
 
 def footprint_hits(cx, cy, h, rects) -> bool:
     poly = np.asarray(_board_corners(cx, cy, h))
-    # board: separating-axis test against each AABB
     for x0, x1, y0, y1 in rects:
         rect = np.array([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
         sep = False
@@ -88,8 +70,6 @@ def footprint_hits(cx, cy, h, rects) -> bool:
 
 
 def footprint_clearance(cx, cy, h, rects) -> float:
-    """Smallest distance from the board and the robot discs to the walls (< 0 on overlap),
-    the distance the safety shield's collision rows measure."""
     if footprint_hits(cx, cy, h, rects):
         return -1.0
     corners = _board_corners(cx, cy, h)
@@ -117,10 +97,6 @@ def hinted_yaw(x, y, hints, default: float = 0.0) -> float:
 
 
 def add_start_curriculum(pool: list[dict], rects, hints, margin: float = 0.10) -> None:
-    """Per pool entry and path index: the board yaw of a mid-path start there (from
-    ``hints``) and whether that start is usable (no overlap and clearance at least the
-    shield margin + 1 cm).  Read by ``isaac_env.randomize_spawn`` when the training
-    start curriculum is on."""
     for e in pool:
         yaws, ok = [], []
         for x, y in e["path"]:
@@ -131,8 +107,6 @@ def add_start_curriculum(pool: list[dict], rects, hints, margin: float = 0.10) -
 
 
 def sweep(points, rects, step: float = 0.05):
-    """Carry the footprint along a polyline (board-X trailing travel).  Returns the
-    fraction of samples that overlap a wall and the hit locations."""
     p = np.asarray(points, dtype=float)
     dense = []
     for a, b in zip(p[:-1], p[1:]):
@@ -154,9 +128,7 @@ def path_length(points) -> float:
 
 
 def crossing_width(phi: float) -> float:
-    """Width of the footprint across the direction of travel when its long axis is
-    ``phi`` rad off that direction (0 = lengthwise, pi/2 = broadside)."""
-    h = math.pi / 2 - phi           # travel along +Y
+    h = math.pi / 2 - phi
     xs = [c[0] for c in _board_corners(0.0, 0.0, h)]
     lo, hi = min(xs), max(xs)
     for rx, _ in _robot_centres(0.0, 0.0, h):
@@ -165,13 +137,10 @@ def crossing_width(phi: float) -> float:
 
 
 def max_carry_angle(opening: float) -> float:
-    """Largest long-axis-to-travel angle (deg) at which the footprint fits ``opening``."""
     return max(d for d in np.arange(0.0, 90.01, 0.5) if crossing_width(math.radians(d)) <= opening)
 
 
 def resample_fixed(vertices, n_points: int) -> list[tuple[float, float]]:
-    """Exactly ``n_points`` points along the polyline, every corner kept; the
-    segments are shared out between the legs in proportion to their length."""
     v = np.asarray(vertices, dtype=float)
     legs = np.linalg.norm(np.diff(v, axis=0), axis=1)
     n_seg = n_points - 1
@@ -191,10 +160,6 @@ def resample_fixed(vertices, n_points: int) -> list[tuple[float, float]]:
 
 def spawn_pool(rects, start, goal, via, start_jitter, goal_jitter, n_points: int,
                size: int = 512, seed: int = 0, max_draws: int = 200_000) -> list[dict]:
-    """Randomised spawn poses and their paths: start (x, y, yaw) and goal (x, y)
-    drawn uniformly within the jitter around the nominal ones, resampled while
-    the spawn footprint overlaps a wall or the path's lengthwise carry does; each
-    path runs start -> ``via`` -> goal with ``n_points`` points."""
     rng = np.random.default_rng(seed)
     pool = []
     for _ in range(max_draws):
@@ -237,24 +202,6 @@ def make_scene(name, rects, vertices, sparse_spacing: float | None, note: str = 
     }
 
 
-# --------------------------------------------------------------------------- #
-# tilt_gate_2m2: a 2.2 m deep gate entered broadside.  The board spawns with its
-# long axis along world X and the path runs straight along +Y, so the formation
-# starts broadside (2.8 m across) and must tilt its long axis towards the travel
-# direction to fit the 2.2 m opening (1.40 m across lengthwise).  The waypoints
-# only give positions; the rotation is left to the policy.  Walls are taller than
-# the board (top at 1.02 m), so they block it physically.
-#   arena    x in [-4.7, 4.7], y in [-1.9, 7.5]
-#   gate     walls y in [1.4, 3.5] (2.1 m deep), opening |x| < 1.1
-#   path     start -> gate entrance (0, 1.4) -> gate exit (0, 3.5) -> goal
-#   spawn    each episode draws start (x, y, yaw) uniformly within
-#            (+-0.93 m, +-0.35 m, +-0.25 rad) of (0, 0, 0) and goal (x, y) within
-#            (+-0.93 m, +-0.35 m) of (0, 5.6), from a pool of validated draws
-#   start curriculum (training only, opt-in)  mid-path starts take their board yaw
-#            from TILT_GATE_YAW_HINTS: 0.97 rad off broadside (55.7 deg, 2.5 deg
-#            steeper than the shallowest carry that keeps the 0.10 m shield margin
-#            on both gate walls) up to 1.5 m past the gate exit, broadside after it
-# --------------------------------------------------------------------------- #
 TILT_GATE_NAME = "tilt_gate_2m2"
 TILT_GATE_OPENING = 2.2
 TILT_GATE_WALL_H = 1.2
@@ -263,19 +210,19 @@ TILT_GATE_VIA = [(0.0, 1.4), (0.0, 3.5)]
 TILT_GATE_JITTER = ((0.933, 0.35, 0.25), (0.933, 0.35))
 TILT_GATE_POINTS = 14
 TILT_GATE_RECTS = [
-    (-4.95, -4.7, -2.15, 7.75),     # arena left
-    (4.7, 4.95, -2.15, 7.75),       # arena right
-    (-4.7, 4.7, -2.15, -1.9),       # arena bottom (behind the start)
-    (-4.7, 4.7, 7.5, 7.75),         # arena top
-    (-4.7, -TILT_GATE_OPENING / 2, 1.4, 3.5),   # gate, left wall
-    (TILT_GATE_OPENING / 2, 4.7, 1.4, 3.5),     # gate, right wall
+    (-4.95, -4.7, -2.15, 7.75),
+    (4.7, 4.95, -2.15, 7.75),
+    (-4.7, 4.7, -2.15, -1.9),
+    (-4.7, 4.7, 7.5, 7.75),
+    (-4.7, -TILT_GATE_OPENING / 2, 1.4, 3.5),
+    (TILT_GATE_OPENING / 2, 4.7, 1.4, 3.5),
 ]
 TILT_GATE_VERTICES = [TILT_GATE_START[:2], *TILT_GATE_VIA, TILT_GATE_GOAL]
 TILT_GATE_HINT_YAW = 0.97
 TILT_GATE_YAW_HINTS = [
-    (-4.7, 4.7, -1.9, 1.05, TILT_GATE_HINT_YAW),                                 # approach
-    (-TILT_GATE_OPENING / 2, TILT_GATE_OPENING / 2, 1.05, 5.02, TILT_GATE_HINT_YAW),  # gate + exit
-    (-4.7, 4.7, 5.02, 7.5, 0.0),                                                 # goal area
+    (-4.7, 4.7, -1.9, 1.05, TILT_GATE_HINT_YAW),
+    (-TILT_GATE_OPENING / 2, TILT_GATE_OPENING / 2, 1.05, 5.02, TILT_GATE_HINT_YAW),
+    (-4.7, 4.7, 5.02, 7.5, 0.0),
 ]
 
 
@@ -291,7 +238,7 @@ def build() -> dict:
     sc["spawn_pool"] = spawn_pool(TILT_GATE_RECTS, TILT_GATE_START, TILT_GATE_GOAL, TILT_GATE_VIA,
                                   *TILT_GATE_JITTER, n_points=TILT_GATE_POINTS)
     sc["yaw_hints"] = [list(h) for h in TILT_GATE_YAW_HINTS]
-    sc["goal_yaw"], sc["yaw_symmetry"] = 0.0, math.pi   # broadside again at the goal, either end leading
+    sc["goal_yaw"], sc["yaw_symmetry"] = 0.0, math.pi
     add_start_curriculum(sc["spawn_pool"], TILT_GATE_RECTS, TILT_GATE_YAW_HINTS)
     return {TILT_GATE_NAME: sc}
 

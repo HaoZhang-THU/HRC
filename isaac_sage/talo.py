@@ -1,24 +1,3 @@
-"""Team-Averaged Lyapunov Policy Optimization (paper Sec. III-D, Eq. 35-45).
-
-Given the independently clipped surrogates L_i (Eq. 37, partner branches
-detached) and the team-reference surrogate L_team (Eq. 38, full composite
-graph), TALO forms the two ascent fields
-
-    g_ind  = [grad_theta_1 L_1 ; ... ; grad_theta_N L_N],    g_team = grad_theta L_team
-
-measures their mismatch with the surrogate update-consistency function
-
-    W_gap = 1/2 ||g_ind - g_team||^2                                     (Eq. 40)
-
-and replaces g_ind by the Euclidean-closest field satisfying the linearised
-descent condition  grad W_gap^T g <= -sigma W_gap  (Eq. 41):
-
-    Delta_gap = grad W_gap^T g_ind + sigma W_gap                          (Eq. 42)
-    g_TALO    = g_ind - [Delta_gap]_+ / (||grad W_gap||^2 + eps) grad W_gap   (Eq. 44)
-
-grad W_gap needs Hessian-vector products; they come from a second autograd
-pass through g_ind and g_team (``create_graph=True``), no explicit Hessian.
-"""
 from __future__ import annotations
 
 from typing import Sequence
@@ -38,14 +17,6 @@ def _dot(a: Sequence[Tensor], b: Sequence[Tensor]) -> Tensor:
 
 def talo_update_field(L_ind: Sequence[Tensor], L_team: Tensor, params: Sequence[Tensor],
                       sigma: float, eps: float, enabled: bool = True) -> tuple[list[Tensor], dict]:
-    """Return the ascent field to apply and diagnostics: g_TALO (Eq. 44) when enabled,
-    otherwise the joint-ratio field g_team (standard centralised PPO update).
-
-    L_ind: per-carrier surrogates L_i(theta_i; sg(theta_-i)) -- each reaches
-           only its owner's block, so grad(sum_i L_i) is the concatenated g_ind.
-    L_team: joint-ratio surrogate L_team(theta).
-    params: the stacked actor parameter list theta (all carriers).
-    """
     need_graph = bool(enabled)
     g_ind = _grads(sum(L_ind), params, create_graph=need_graph)
     g_team = _grads(L_team, params, create_graph=need_graph)

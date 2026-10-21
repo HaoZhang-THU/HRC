@@ -1,21 +1,3 @@
-"""Adapter between the Isaac Lab G1 cooperative-transport environment and the
-environment-agnostic SAGE trainer.
-
-The adapter exposes exactly what Algorithms 1-2 need:
-    reset()         -> stacked joint observation [B, N*obs_dim]
-    step(a_norm)    -> (stacked obs, team reward [B], done [B], scalar log dict)
-    safety_state()  -> geometric state x for the affine CBF rows (board pose,
-                       every robot's pose, grasp anchors, wall boxes, action scale)
-
-Normalised actions a in [-1, 1]^3 per controlled carrier are scaled to the
-environment's body-frame command box (max_target_dist, max_target_dist,
-max_target_yaw) -- the same box the environment clamps to -- so the
-one-step predictor in ``safety.py`` and the executed command share one scale.
-
-The scene has three robots; the environment's ``possible_agents`` are the
-learning carriers; the third robot's command is computed from the payload pose,
-so it enters the safety rows as a disc attached to the payload.
-"""
 from __future__ import annotations
 
 import math
@@ -35,13 +17,6 @@ ISAACLAB_CORE_PACKAGES = ("isaaclab", "isaaclab_assets", "isaaclab_rl", "isaacla
 
 
 def use_isaaclab_core(core_root: str | Path) -> None:
-    """Resolve ``isaaclab*`` imports (and the Kit experience files) from the Isaac Lab
-    checkout at ``core_root`` instead of the copy installed in the python env.
-
-    Editable installs pin their checkout through meta-path finders that take
-    precedence over ``sys.path``, so those finders are dropped first.  Must run
-    before anything imports ``isaaclab``.
-    """
     core_root = Path(core_root)
     if not (core_root / "source" / "isaaclab" / "isaaclab").is_dir():
         raise FileNotFoundError(f"no Isaac Lab checkout at {core_root}")
@@ -58,9 +33,6 @@ def use_isaaclab_core(core_root: str | Path) -> None:
 
 
 def setup_isaaclab_path() -> Path | None:
-    """Import ``isaaclab*`` from the Isaac Lab checkout named by ``ISAACLAB_CORE_ROOT``
-    (the pinned commit, see README) when the variable is set.  Must run before
-    anything imports ``isaaclab``."""
     core = os.environ.get("ISAACLAB_CORE_ROOT")
     if not core:
         return None
@@ -69,21 +41,12 @@ def setup_isaaclab_path() -> Path | None:
 
 
 def register_task() -> None:
-    """Import (and thereby gym-register) the cooperative-transport task package.
-    Must be called after the Isaac Sim app has been launched."""
     import importlib
 
     importlib.import_module(TASK_PKG)
 
 
 def ungate_progress(env) -> None:
-    """Pay forward progress at full weight whatever the board heading.
-
-    The task multiplies positive progress by ``clamp(cos(board -X vs path tangent), 0, 1)``,
-    so a broadside carry earns no progress at all.  This wraps ``env._get_rewards`` and adds
-    back ``w_progress * max(progress, 0) * (1 - align)``, recomputing ``progress`` (before the
-    waypoint window advances) and ``align`` (after it) exactly as the task does.
-    """
     import math
 
     from .task.cooperative_transport_env import _get_heading_yaw
@@ -116,14 +79,11 @@ def ungate_progress(env) -> None:
 
 
 def _env_paths(env) -> Tensor:
-    """Per-environment path [N, P, 2] (env-local): the drawn spawn_pool path if any."""
     p = getattr(env, "_sage_env_path", None)
     return p if p is not None else env._path.unsqueeze(0).expand(env.num_envs, -1, -1)
 
 
 def _project(paths: Tensor, pts: Tensor) -> tuple[Tensor, Tensor]:
-    """Arc length of the closest point on each polyline to ``pts`` [N] and the
-    cumulative arc length at every path point [N, P]."""
     a, ab = paths[:, :-1], paths[:, 1:] - paths[:, :-1]
     seg2 = (ab * ab).sum(-1).clamp_min(1e-12)
     t = (((pts.unsqueeze(1) - a) * ab).sum(-1) / seg2).clamp(0.0, 1.0)
@@ -136,9 +96,6 @@ def _project(paths: Tensor, pts: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def episode_flags(env) -> tuple[Tensor, Tensor]:
-    """(success, loose success) of the running episodes: success is the tight
-    criterion when ``tight_success`` is installed, else the loose one; loose is
-    "the board reached the final path point"."""
     loose = getattr(env, "_sage_loose", None)
     loose = env._goal_reached if loose is None else loose
     succ = getattr(env, "_sage_success", None)
@@ -149,19 +106,11 @@ LOOSE_GOAL_RADIUS = 0.15
 
 
 def projected_progress(env, loose_goal: bool = True) -> None:
-    """Progress = advance of the board's projection onto the path (arc length),
-    paid at full weight whatever the heading; the waypoint window starts at the
-    first path point past the projection, so no waypoint has to be visited and
-    there is no per-waypoint bonus.  Replaces the task's distance-to-active-waypoint
-    progress, its waypoint bonus and its goal latch.  With ``loose_goal`` the goal
-    latch (``env._goal_reached``, its bonus and, with ``cfg.terminate_on_goal``, the
-    termination one step later) fires when the board is within ``LOOSE_GOAL_RADIUS``
-    of the final path point."""
     from .task import cooperative_transport_env as task_mod
 
     if not env.cfg.use_normalized_reward or not env.cfg.use_fixed_path:
         raise ValueError("projected_progress needs the normalised reward and a fixed path")
-    task_mod.WP_REACH_THRESHOLD = -1.0          # the task never advances / bonuses / latches the goal
+    task_mod.WP_REACH_THRESHOLD = -1.0
     n, dev = env.num_envs, env.device
     n_pts = int(env._path.shape[0])
     hl_dt = env.cfg.sim.dt * env.cfg.decimation
@@ -171,7 +120,6 @@ def projected_progress(env, loose_goal: bool = True) -> None:
     orig_rewards, orig_reset = env._get_rewards, env._reset_idx
 
     def _sync(ids, s, s_cum):
-        # a board sitting on a path point (float32) counts as past it
         k = torch.searchsorted(s_cum.contiguous(), (s + 1e-3).unsqueeze(1)).squeeze(1).clamp(1, n_pts - 1)
         env._path_idx[ids] = k
         env._wp_reached_count[ids] = k - 1
@@ -186,9 +134,9 @@ def projected_progress(env, loose_goal: bool = True) -> None:
         s, s_cum = _project(paths, local)
         progress = ((s - env._sage_s) / v_ref).clamp(-1.0, 1.0)
         env._sage_s = s
-        _sync(ids, s, s_cum)         # the task's own progress term is then exactly 0
+        _sync(ids, s, s_cum)
         rew = orig_rewards()
-        env._sage_stream = dict(rew)  # per-step terms without progress / waypoint / goal bonus
+        env._sage_stream = dict(rew)
         at_goal = torch.norm(paths[:, -1] - local, dim=-1) < LOOSE_GOAL_RADIUS
         env._sage_loose |= at_goal
         r = env.cfg.nrew_w_progress * progress
@@ -221,12 +169,6 @@ def projected_progress(env, loose_goal: bool = True) -> None:
 def tight_success(env, goal_yaw: float, yaw_symmetry: float, pos_tol: float = 0.20, yaw_tol: float = 0.25,
                   speed_tol: float = 0.15, yaw_rate_tol: float = 0.30, hold_steps: int = 2,
                   shaping_radius: float = 1.75, shaping_weight: float = 0.2) -> None:
-    """Success = board within ``pos_tol`` of the final path point AND its yaw within
-    ``yaw_tol`` of ``goal_yaw`` (modulo ``yaw_symmetry``), with board speed and yaw rate
-    below ``speed_tol`` / ``yaw_rate_tol``, for ``hold_steps`` consecutive high-level
-    steps.  The task's goal bonus moves to that moment and ends the episode; within
-    ``shaping_radius`` of the goal, ``shaping_weight * (1 - |yaw err| / (symmetry / 2))``
-    is added every step.  Needs ``cfg.terminate_on_goal = False``."""
     from .task.cooperative_transport_env import _get_heading_yaw
 
     if env.cfg.terminate_on_goal:
@@ -284,14 +226,6 @@ def tight_success(env, goal_yaw: float, yaw_symmetry: float, pos_tol: float = 0.
 
 
 def success_compensation(env, gamma: float = 0.99) -> None:
-    """On the step the goal bonus is paid, also pay the discounted value of collecting
-    that step's per-step reward for the rest of the time budget:
-    ``r * (1 - gamma^K) / (1 - gamma)`` with ``K`` the remaining high-level steps and
-    ``r`` floored at 0.  ``r`` excludes progress and bonuses when ``projected_progress``
-    is installed (else it is the step's reward minus the goal bonus).  The task's
-    per-step terms are positive, so without this an early success forfeits more than
-    the bonus and lingering next to the goal pays better than finishing.  Nothing else
-    changes (failures still forfeit the remaining reward)."""
     orig = env._get_rewards
     w_goal = float(env.cfg.nrew_w_goal)
 
@@ -323,14 +257,11 @@ TASK_OPTIONS = ("projection_progress", "success_mode", "partner_noise", "partner
 
 
 def configure_task_cfg(cfg, opts: dict) -> None:
-    """Config changes the task options need before ``gym.make``."""
     if opts.get("success_mode") == "tight":
         cfg.terminate_on_goal = False
 
 
 def apply_task_options(env, opts: dict, scene: dict | None) -> list[str]:
-    """Install ``projected_progress`` / ``tight_success`` (call after ``randomize_spawn``);
-    returns a description of what was installed."""
     done = []
     if opts.get("projection_progress"):
         loose = opts.get("success_mode") != "tight"
@@ -349,23 +280,6 @@ def apply_task_options(env, opts: dict, scene: dict | None) -> list[str]:
 
 
 def randomize_spawn(env, pool: list[dict], curriculum: dict | None = None) -> None:
-    """Per-episode spawn pose and path from a scene's ``spawn_pool``.
-
-    Every entry is ``{"pose": [x, y, yaw], "path": [[x, y], ...]}`` (env-local, paths
-    all as long as ``cfg.path_waypoints``).  On each reset an entry is drawn per
-    environment; the whole formation is moved rigidly from the task's spawn (board
-    centre ``cfg.start_xy``, yaw 0) to the drawn pose, and the waypoint window reads
-    that environment's own path.
-
-    ``curriculum`` (training only) = {"prob", "initial_low", "final_low", "anneal_fraction"}:
-    with probability ``prob`` an episode instead starts on path point
-    ``int(s * (P - 1))``, ``s ~ U(low, 0.95)``, with the entry's ``curriculum_yaw`` there,
-    where ``low`` goes linearly from ``initial_low`` to ``final_low`` over the first
-    ``anneal_fraction`` of training (``env._sage_train_progress``); points whose
-    ``curriculum_ok`` is false keep the true start.  Finished episodes are logged per
-    start type as ``episodes_<t>`` / ``success_<t>`` / ``loose_success_<t>`` with
-    ``<t>`` in {true_start, curriculum} (counts per step; see ``episode_flags``).
-    """
     from isaaclab.utils.math import quat_mul
     from .task.cooperative_transport_env import (
         ALL_ROBOT_IDS, NUM_WAYPOINTS, _get_heading_yaw)
@@ -396,7 +310,6 @@ def randomize_spawn(env, pool: list[dict], curriculum: dict | None = None) -> No
             env._waypoints[env_ids, k] = env_path[env_ids, idx] + origins
 
     def _place(obj, env_ids, xy, yaw):
-        """Pose of ``obj`` after moving its default spawn rigidly to (xy, yaw); returns world xy."""
         st = obj.data.default_root_state[env_ids].clone()
         c, s = torch.cos(yaw), torch.sin(yaw)
         rel = st[:, :2] - centre
@@ -482,15 +395,11 @@ class IsaacCoopTransportAdapter:
         self.board_dims = (BOARD_LENGTH, BOARD_WIDTH)
         self._partner = None
 
-    # ------------------------------------------------------------------ #
     def _stack(self, obs_dict: dict) -> Tensor:
         return torch.cat([obs_dict[a].to(self.device) for a in self.agent_ids], dim=-1)
 
     def set_partner_perturbation(self, slot: int = 1, lin: float = 0.01, yaw_deg: float = 1.5,
                                  gain_lin: float = 1.0, gain_yaw: float = 1.0) -> None:
-        """Perturb the executed command of carrier ``slot`` every step: translation
-        scaled by ``gain_lin`` plus U(-lin, lin) m per axis, then rotated by N(0, yaw_deg);
-        yaw command scaled by ``gain_yaw``.  Applies after any shield projection."""
         self._partner = {"slot": int(slot), "lin": float(lin), "yaw": math.radians(yaw_deg),
                          "gain_lin": float(gain_lin), "gain_yaw": float(gain_yaw)}
 
@@ -503,7 +412,6 @@ class IsaacCoopTransportAdapter:
         return torch.cat((xy, cmd[:, 2:] * p["gain_yaw"]), -1)
 
     def set_train_progress(self, frac: float) -> None:
-        """Training progress in [0, 1], read by the start curriculum of ``randomize_spawn``."""
         self.env._sage_train_progress = float(frac)
 
     def reset(self) -> Tensor:

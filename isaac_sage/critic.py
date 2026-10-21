@@ -1,12 +1,3 @@
-"""Team-context critic (paper Eq. 33).
-
-    z_t = (1/N) sum_i psi_phi(o_{i,t}),     V_t = V_omega(o_t, z_t)
-
-A shared encoder psi_phi maps each local observation to a latent; the
-permutation-insensitive team average z is concatenated with the stacked joint
-observation before the value head.  Trained on executed-transition returns
-(Eq. 34), used only during centralised training.
-"""
 from __future__ import annotations
 
 import torch
@@ -36,10 +27,6 @@ class TeamContextCritic(nn.Module):
 
 
 class JointCritic(nn.Module):
-    """Centralised critic of the HAPPO baseline on the concatenated
-    observations of all carriers, no team context: input LayerNorm, ReLU layers each
-    followed by LayerNorm, orthogonal init.  Outputs values in ValueNorm units."""
-
     def __init__(self, obs_dim_per: int, n_agents: int, hidden_sizes=(256, 256, 128)):
         super().__init__()
         self.obs_dim_per, self.n_agents = obs_dim_per, n_agents
@@ -62,8 +49,6 @@ class JointCritic(nn.Module):
 
 
 class ValueNorm(nn.Module):
-    """Value normalisation: debiased EMA of return mean / second moment (beta 0.99999)."""
-
     def __init__(self, beta: float = 0.99999, epsilon: float = 1e-5):
         super().__init__()
         self.beta, self.epsilon = beta, epsilon
