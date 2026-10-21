@@ -226,7 +226,48 @@ TILT_GATE_YAW_HINTS = [
 ]
 
 
-def build() -> dict:
+MAZE_NAME = "maze"
+MAZE_SPECS = [
+    ((5.05, 0.25, 0.71), (1.55, -0.695, 0.355)),
+    ((7.7, 0.25, 0.71), (0.225, -3.945, 0.355)),
+    ((0.25, 1.675, 0.71), (-1.1, 0.0175, 0.355)),
+    ((0.25, 8.075, 0.71), (-3.75, -0.0325, 0.355)),
+    ((5.05, 0.25, 0.71), (-1.1, 3.88, 0.355)),
+    ((0.25, 3.15, 0.71), (1.55, 3.505, 0.355)),
+    ((2.4, 0.25, 0.71), (2.875, 4.955, 0.355)),
+    ((0.25, 9.15, 0.71), (4.2, 0.505, 0.355)),
+]
+MAZE_PATH = [
+    (2.0, -2.32), (1.5, -2.32), (1.0, -2.32), (0.5, -2.32),
+    (0.0, -2.32), (-0.5, -2.32), (-1.0, -2.32), (-1.325, -2.32),
+    (-1.65, -2.32), (-1.895, -2.07), (-2.14, -1.82), (-2.14, -1.335),
+    (-2.14, -0.85), (-2.14, -0.365), (-2.14, 0.12), (-2.14, 0.62),
+    (-2.14, 0.87), (-2.14, 1.12), (-2.14, 1.62), (-1.87, 1.925),
+    (-1.6, 2.23), (-1.15, 2.23), (-0.7, 2.23), (-0.32, 1.978),
+    (0.06, 1.726), (0.44, 1.474), (0.82, 1.222), (1.2, 0.97),
+    (1.7, 0.97), (1.95, 0.97), (2.2, 0.97), (2.425, 1.32),
+    (2.65, 1.67), (2.65, 2.145), (2.65, 2.62), (2.65, 3.0),
+]
+MAZE_RECTS = [(c[0] - s[0] / 2, c[0] + s[0] / 2, c[1] - s[1] / 2, c[1] + s[1] / 2) for s, c in MAZE_SPECS]
+MAZE_START, MAZE_GOAL = (2.0, -2.32, 0.0), (2.65, 3.0)
+MAZE_VIA = [(-1.65, -2.32), (-2.14, -1.82), (-2.14, 1.62), (-1.6, 2.23), (-0.7, 2.23), (1.2, 0.97),
+            (2.2, 0.97), (2.65, 1.67)]
+MAZE_JITTER = ((0.5, 0.4, 0.2), (0.3, 0.3))
+
+
+def add_path_curriculum(pool: list[dict], rects, margin: float = 0.10) -> None:
+    for entry in pool:
+        path = np.asarray(entry["path"], dtype=float)
+        yaws, ok = [], []
+        for k in range(len(path)):
+            d = path[min(k + 1, len(path) - 1)] - path[max(k - 1, 0)]
+            yaw = math.remainder(math.atan2(d[1], d[0]) + math.pi, 2 * math.pi)
+            yaws.append(round(yaw, 4))
+            ok.append(bool(footprint_clearance(path[k, 0], path[k, 1], yaw, rects) >= margin + 0.01))
+        entry["curriculum_yaw"], entry["curriculum_ok"] = yaws, ok
+
+
+def build_tilt_gate() -> dict:
     opening = TILT_GATE_OPENING
     sc = make_scene(
         TILT_GATE_NAME, TILT_GATE_RECTS, TILT_GATE_VERTICES, None,
@@ -240,7 +281,32 @@ def build() -> dict:
     sc["yaw_hints"] = [list(h) for h in TILT_GATE_YAW_HINTS]
     sc["goal_yaw"], sc["yaw_symmetry"] = 0.0, math.pi
     add_start_curriculum(sc["spawn_pool"], TILT_GATE_RECTS, TILT_GATE_YAW_HINTS)
-    return {TILT_GATE_NAME: sc}
+    return sc
+
+
+def build_maze() -> dict:
+    sc = {
+        "name": MAZE_NAME,
+        "note": "the task's default maze; randomised spawn (use --fixed_spawn for the default start)",
+        "aabbs": [list(r) for r in MAZE_RECTS],
+        "obstacle_specs": [[list(s), list(c)] for s, c in MAZE_SPECS],
+        "reference_path": [list(p) for p in MAZE_PATH],
+        "path_waypoints": [list(p) for p in MAZE_PATH],
+        "start_xy": list(MAZE_PATH[0]),
+        "path_length_m": round(path_length(MAZE_PATH), 2),
+        "episode_length_s": 300.0,
+        "env_spacing": 10.0,
+    }
+    sc["spawn_pool"] = spawn_pool(MAZE_RECTS, MAZE_START, MAZE_GOAL, MAZE_VIA, *MAZE_JITTER,
+                                  n_points=len(MAZE_PATH))
+    add_path_curriculum(sc["spawn_pool"], MAZE_RECTS)
+    sc["yaw_hints"] = []
+    sc["goal_yaw"], sc["yaw_symmetry"] = -math.pi / 2, math.pi
+    return sc
+
+
+def build() -> dict:
+    return {TILT_GATE_NAME: build_tilt_gate(), MAZE_NAME: build_maze()}
 
 
 def _render(scene: dict, out_png: Path) -> None:

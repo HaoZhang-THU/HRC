@@ -60,6 +60,7 @@ conda activate isaac_sage
 export OMNI_KIT_ACCEPT_EULA=YES    # after reading the NVIDIA Omniverse EULA
 bash train.sh sage                 # one arm (200 iterations)
 bash train.sh all                  # tree, tree_cbf, sail, talo, sage, one after another
+SCENE=<name> bash train.sh all     # the same five arms on another scene
 bash eval.sh results/<scene>_sage_seed1_<date>   # deployment evaluation of models/iter_200.pt
 ```
 
