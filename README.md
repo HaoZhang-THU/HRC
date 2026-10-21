@@ -42,11 +42,11 @@ The implementation details and training recipe below describe the **SAGE**
 configuration of this shared codebase.
 
 Reference implementation and training recipe for **SAGE** on an Isaac Lab task in
-which **N = 3** Unitree G1 humanoids carry one rigid board through obstacle
-courses. Each carrier's high-level policy is a **hard oblique decision tree**. Every
+which multiple Unitree G1 humanoids carry a rigid board through obstacle
+courses. Each carrier's high-level policy is a **decision tree**. Every
 executed command passes through an exact control-barrier QP that covers the whole
 formation. **SAIL** (shield-annealed internalisation) and **TALO** (team-averaged
-Lyapunov policy optimisation) train the trees so that the deployed tree relies on
+Lyapunov policy optimisation) or **HALO** train the trees so that the deployed tree relies on
 the shield as little as possible, and the separately parameterised carriers
 update as a team. Every arm below is trained from the same initialisation with
 one command.
