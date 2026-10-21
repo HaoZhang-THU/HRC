@@ -305,8 +305,157 @@ def build_maze() -> dict:
     return sc
 
 
+COURSE_WALL_H = TILT_GATE_WALL_H
+ARENA_T = 0.25
+WAYPOINT_SPACING = 0.43
+
+
+def arena(x0: float, x1: float, y0: float, y1: float) -> list[tuple]:
+    t = ARENA_T
+    return [(x0 - t, x0, y0 - t, y1 + t), (x1, x1 + t, y0 - t, y1 + t),
+            (x0, x1, y0 - t, y0), (x0, x1, y1, y1 + t)]
+
+
+def footprint_shift(h: float) -> tuple[float, float]:
+    xs, ys = map(list, zip(*_board_corners(0.0, 0.0, h)))
+    for rx, ry in _robot_centres(0.0, 0.0, h):
+        xs += [rx - ROBOT_R, rx + ROBOT_R]
+        ys += [ry - ROBOT_R, ry + ROBOT_R]
+    return round(-(min(xs) + max(xs)) / 2, 3), round(-(min(ys) + max(ys)) / 2, 3)
+
+
+def course_points(vertices) -> int:
+    return int(round(path_length(vertices) / WAYPOINT_SPACING)) + 1
+
+
+LENGTHWISE_DY = footprint_shift(0.0)[1]
+
+
+LENGTHWISE_DY_BACK = footprint_shift(math.pi)[1]
+LENGTHWISE_DX_UP = footprint_shift(-math.pi / 2)[0]
+
+
+def arc(cx: float, cy: float, r: float, t0: float, t1: float, k: int) -> list[tuple[float, float]]:
+    return [(round(cx + r * math.cos(t), 3), round(cy + r * math.sin(t), 3)) for t in np.linspace(t0, t1, k)]
+
+
+def arc_band_hints(cx: float, cy: float, r: float, t0: float, t1: float, n_bands: int = 4,
+                   pad: float = 0.15) -> list[tuple]:
+    out = []
+    for k in range(n_bands):
+        a0, a1 = t0 + k * (t1 - t0) / n_bands, t0 + (k + 1) * (t1 - t0) / n_bands
+        ts = np.linspace(a0, a1, 9)
+        xs, ys = cx + r * np.cos(ts), cy + r * np.sin(ts)
+        out.append((round(xs.min() - pad, 3), round(xs.max() + pad, 3), round(ys.min() - pad, 3),
+                    round(ys.max() + pad, 3), round(math.remainder((a0 + a1) / 2 + math.pi / 2, 2 * math.pi), 4)))
+    return out
+
+
+S_SHAPED_LANE, S_SHAPED_GATE, S_SHAPED_TURN_GAP = 3.0, 2.0, 2.2
+_SS_H, _SS_TIP, _SS_XR, _SS_XG = 0.2335, -2.5, 5.6, 0.3
+_SS_LANE_C = -(_SS_H + S_SHAPED_LANE / 2)
+S_SHAPED_RECTS = arena(_SS_TIP - S_SHAPED_TURN_GAP, _SS_XR, -S_SHAPED_LANE - _SS_H, S_SHAPED_LANE + _SS_H) + [
+    (_SS_TIP, _SS_XR, -_SS_H, _SS_H),
+    (_SS_XG, _SS_XG + 0.467, -S_SHAPED_LANE - _SS_H, _SS_LANE_C - S_SHAPED_GATE / 2),
+    (_SS_XG, _SS_XG + 0.467, _SS_LANE_C + S_SHAPED_GATE / 2, -_SS_H),
+]
+_SS_B0, _SS_B1 = _SS_LANE_C + LENGTHWISE_DY, -_SS_LANE_C + LENGTHWISE_DY_BACK
+_SS_TC, _SS_TY, _SS_TR = _SS_TIP + 0.75, (_SS_B0 + _SS_B1) / 2, (_SS_B1 - _SS_B0) / 2
+S_SHAPED_START, S_SHAPED_GOAL = (3.5, _SS_B0, 0.0), (3.5, _SS_B1)
+S_SHAPED_VIA = ([(_SS_XG + 1.467, _SS_B0), (_SS_XG + 0.467, _SS_B0), (_SS_XG, _SS_B0), (_SS_TC, _SS_B0)]
+                + arc(_SS_TC, _SS_TY, _SS_TR, -math.pi / 2, -1.5 * math.pi, 17)[1:-1]
+                + [(_SS_TC, _SS_B1)])
+S_SHAPED_JITTER = ((0.5, 0.6, 0.25), (0.5, 0.6))
+S_SHAPED_YAW_HINTS = arc_band_hints(_SS_TC, _SS_TY, _SS_TR, -math.pi / 2, -1.5 * math.pi, n_bands=6) + [
+    (_SS_TIP - S_SHAPED_TURN_GAP, _SS_XR, -S_SHAPED_LANE - _SS_H, -_SS_H, 0.0),
+    (_SS_TIP - S_SHAPED_TURN_GAP, _SS_XR, _SS_H, S_SHAPED_LANE + _SS_H, math.pi),
+]
+
+U_SHAPED_WIDTH = 2.5
+_US_X0, _US_X1, _US_Y0, _US_Y1 = -2.5, 5.5, -2.5, 2.5
+U_SHAPED_RECTS = arena(_US_X0 - U_SHAPED_WIDTH, _US_X1, _US_Y0 - U_SHAPED_WIDTH, _US_Y1 + U_SHAPED_WIDTH) + [
+    (_US_X0, _US_X1, _US_Y0, _US_Y1),
+]
+_US_BL = _US_Y0 - U_SHAPED_WIDTH / 2 + LENGTHWISE_DY
+_US_BS = _US_X0 - U_SHAPED_WIDTH / 2 + LENGTHWISE_DX_UP
+_US_BU = _US_Y1 + U_SHAPED_WIDTH / 2 + LENGTHWISE_DY_BACK
+U_SHAPED_TURN_R = 1.3
+U_SHAPED_START, U_SHAPED_GOAL = (3.5, _US_BL, 0.0), (3.5, _US_BU)
+U_SHAPED_VIA = ([(_US_X0 + 1.0, _US_BL)] + arc(_US_X0, _US_Y0, U_SHAPED_TURN_R, -math.pi / 2, -math.pi, 13)
+                + [(_US_BS, _US_Y0 + 1.0), (_US_BS, _US_Y1 - 1.0)]
+                + arc(_US_X0, _US_Y1, U_SHAPED_TURN_R, math.pi, math.pi / 2, 13) + [(_US_X0 + 1.0, _US_BU)])
+U_SHAPED_JITTER = ((0.5, 0.4, 0.2), (0.5, 0.4))
+U_SHAPED_YAW_HINTS = (
+    arc_band_hints(_US_X0, _US_Y0, U_SHAPED_TURN_R, -math.pi / 2, -math.pi)
+    + arc_band_hints(_US_X0, _US_Y1, U_SHAPED_TURN_R, math.pi, math.pi / 2)
+    + [(_US_X0, _US_X1, _US_Y0 - U_SHAPED_WIDTH, _US_Y0, 0.0),
+       (_US_X0 - U_SHAPED_WIDTH, _US_X0, _US_Y0, _US_Y1, -math.pi / 2),
+       (_US_X0, _US_X1, _US_Y1, _US_Y1 + U_SHAPED_WIDTH, math.pi)]
+)
+
+L_CORRIDOR_WIDTH = 2.2
+_LC_C, _LC_H, _LC_T = -2.8, L_CORRIDOR_WIDTH / 2, 0.467
+L_CORRIDOR_RECTS = [
+    (_LC_C + _LC_H, 4.667, _LC_C + _LC_H, _LC_C + _LC_H + _LC_T),
+    (_LC_C + _LC_H, _LC_C + _LC_H + _LC_T, _LC_C + _LC_H, 4.667),
+    (_LC_C - _LC_H - _LC_T, 4.667, _LC_C - _LC_H - _LC_T, _LC_C - _LC_H),
+    (_LC_C - _LC_H - _LC_T, _LC_C - _LC_H, _LC_C - _LC_H, 4.667),
+    (4.667, 4.667 + _LC_T, _LC_C - _LC_H - _LC_T, _LC_C + _LC_H + _LC_T),
+    (_LC_C - _LC_H - _LC_T, _LC_C + _LC_H + _LC_T, 4.667, 4.667 + _LC_T),
+]
+_LC_B = _LC_C + LENGTHWISE_DY
+_LC_IN = round(_LC_C + _LC_H, 3)
+L_CORRIDOR_TURN_R = 1.15
+L_CORRIDOR_START, L_CORRIDOR_GOAL = (1.867, _LC_B, 0.0), (_LC_B, 1.867)
+L_CORRIDOR_VIA = ([(_LC_IN + 1.0, _LC_B)] + arc(_LC_IN, _LC_IN, L_CORRIDOR_TURN_R, -math.pi / 2, -math.pi, 13)
+                  + [(_LC_B, _LC_IN + 1.0)])
+L_CORRIDOR_JITTER = ((1.05, 0.233, 0.2), (0.233, 1.05))
+L_CORRIDOR_YAW_HINTS = arc_band_hints(_LC_IN, _LC_IN, L_CORRIDOR_TURN_R, -math.pi / 2, -math.pi) + [
+    (_LC_IN, 4.667, _LC_C - _LC_H, _LC_IN, 0.0),
+    (_LC_C - _LC_H, _LC_IN, _LC_IN, 4.667, -math.pi / 2),
+]
+
+
+def course(name, rects, start, goal, via, jitter, hints, goal_yaw: float, note: str,
+           sparse_spacing: float | None = None) -> dict:
+    vertices = [start[:2], *via, goal]
+    n_points = course_points(vertices)
+    sc = make_scene(name, rects, vertices, sparse_spacing, note=note, min_budget_s=150.0,
+                    wall_h=COURSE_WALL_H, reference=resample_fixed(vertices, n_points))
+    sc["spawn_pool"] = spawn_pool(rects, start, goal, via, *jitter, n_points=n_points)
+    sc["yaw_hints"] = [list(h) for h in hints]
+    sc["goal_yaw"], sc["yaw_symmetry"] = goal_yaw, math.pi
+    add_start_curriculum(sc["spawn_pool"], rects, hints)
+    return sc
+
+
+def build_s_shaped() -> dict:
+    return course(
+        "s_shaped", S_SHAPED_RECTS, S_SHAPED_START, S_SHAPED_GOAL,
+        S_SHAPED_VIA, S_SHAPED_JITTER, S_SHAPED_YAW_HINTS, 0.0,
+        f"{S_SHAPED_LANE} m lanes, {S_SHAPED_GATE} m gate, 180 deg turn through a {S_SHAPED_TURN_GAP} m "
+        f"gap; carried lengthwise along -X then +X; randomised spawn")
+
+
+def build_u_shaped() -> dict:
+    return course(
+        "u_shaped", U_SHAPED_RECTS, U_SHAPED_START, U_SHAPED_GOAL,
+        U_SHAPED_VIA, U_SHAPED_JITTER, U_SHAPED_YAW_HINTS, 0.0,
+        f"{U_SHAPED_WIDTH} m corridor round three sides of an 8.0 x 5.0 m block; carried lengthwise along -X, "
+        "then +Y, then +X; randomised spawn")
+
+
+def build_l_corridor() -> dict:
+    return course(
+        "l_corridor", L_CORRIDOR_RECTS, L_CORRIDOR_START, L_CORRIDOR_GOAL,
+        L_CORRIDOR_VIA, L_CORRIDOR_JITTER, L_CORRIDOR_YAW_HINTS, -math.pi / 2,
+        f"closed {L_CORRIDOR_WIDTH} m corridor, one 90 deg corner; carried lengthwise along -X then +Y; "
+        "randomised spawn")
+
+
 def build() -> dict:
-    return {TILT_GATE_NAME: build_tilt_gate(), MAZE_NAME: build_maze()}
+    return {TILT_GATE_NAME: build_tilt_gate(), MAZE_NAME: build_maze(), "s_shaped": build_s_shaped(),
+            "u_shaped": build_u_shaped(), "l_corridor": build_l_corridor()}
 
 
 def _render(scene: dict, out_png: Path) -> None:
