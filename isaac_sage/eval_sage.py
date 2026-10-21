@@ -93,21 +93,21 @@ from isaac_sage.task.cooperative_transport_env import (
 
 def _resolve_env_toggles() -> dict:
     toggles: dict = {}
-    cands = [Path(args_cli.run_args)] if args_cli.run_args else [
+    candidates = [Path(args_cli.run_args)] if args_cli.run_args else [
         Path(args_cli.checkpoint).resolve().parent / "run_args.json",
         Path(args_cli.checkpoint).resolve().parent.parent / "run_args.json"]
-    for p in cands:
-        if p.is_file():
-            run = json.loads(p.read_text())
-            toggles = {k: run.get(k) for k in ENV_TOGGLES if run.get(k) not in (None, False)}
-            print(f"[eval] env toggles from {p}: {toggles}")
+    for path in candidates:
+        if path.is_file():
+            run = json.loads(path.read_text())
+            toggles = {key: run.get(key) for key in ENV_TOGGLES if run.get(key) not in (None, False)}
+            print(f"[eval] env toggles from {path}: {toggles}")
             break
     else:
         print("[eval] no run_args.json found next to the checkpoint; using CLI toggles only")
-    for k in ENV_TOGGLES:
-        v = getattr(args_cli, k)
-        if v is not None:
-            toggles[k] = v
+    for key in ENV_TOGGLES:
+        value = getattr(args_cli, key)
+        if value is not None:
+            toggles[key] = value
     return toggles
 
 
@@ -135,8 +135,8 @@ def _configure_env_cfg(cfg, toggles: dict, scene: dict | None):
     if toggles.get("low_level_policy_path"):
         cfg.low_level_policy_path = toggles["low_level_policy_path"]
     if scene is not None:
-        cfg.obstacle_specs = [(tuple(s), tuple(p)) for s, p in scene["obstacle_specs"]]
-        cfg.path_waypoints = [tuple(w) for w in scene["path_waypoints"]]
+        cfg.obstacle_specs = [(tuple(size), tuple(pos)) for size, pos in scene["obstacle_specs"]]
+        cfg.path_waypoints = [tuple(waypoint) for waypoint in scene["path_waypoints"]]
         cfg.start_xy = tuple(scene.get("start_xy", scene["path_waypoints"][0]))
         cfg.use_fixed_path = True
         if "env_spacing" in scene:
@@ -151,35 +151,35 @@ def _configure_env_cfg(cfg, toggles: dict, scene: dict | None):
 
 
 @torch.no_grad()
-def soft_action(actor, safety, obs_norm, obs_raw, state, tau: float):
-    obs = obs_norm.normalize(obs_raw)
-    acts, leaves = [], []
-    for i, a in enumerate(actor.actors):
-        a_i, tinfo = a.tree(actor.obs_i(obs, i), tau, hard=False)
-        acts.append(a_i)
-        leaves.append(tinfo["leaf"])
-    a_nom = torch.cat(acts, -1)
+def soft_action(actor, safety, obs_norm, raw_obs, state, tau: float):
+    obs = obs_norm.normalize(raw_obs)
+    actions, leaves = [], []
+    for i, carrier in enumerate(actor.actors):
+        action, tree_info = carrier.tree(actor.agent_obs(obs, i), tau, hard=False)
+        actions.append(action)
+        leaves.append(tree_info["leaf"])
+    nominal_actions = torch.cat(actions, -1)
     rows = safety.rows(state)
-    a_exec, qp = safety.exact_projection(a_nom, rows)
-    return a_exec, {"a_nom": a_nom, "leaves": torch.stack(leaves, -1), "rows": rows,
-                    "violated": rows.violated(a_nom), **qp}
+    shielded_actions, qp_info = safety.exact_projection(nominal_actions, rows)
+    return shielded_actions, {"a_nom": nominal_actions, "leaves": torch.stack(leaves, -1), "rows": rows,
+                    "violated": rows.violated(nominal_actions), **qp_info}
 
 
 def _load_checkpoint(path: str, adapter, device):
-    ck = torch.load(path, map_location=device, weights_only=False)
-    for k, cur in (("n_agents", adapter.n_agents), ("obs_dim_per", adapter.obs_dim_per),
+    loaded_dict = torch.load(path, map_location=device, weights_only=False)
+    for key, current in (("n_agents", adapter.num_agents), ("obs_dim_per", adapter.obs_dim_per),
                    ("act_dim_per", adapter.act_dim_per)):
-        if int(ck[k]) != int(cur):
-            raise ValueError(f"checkpoint {k}={ck[k]} != env {k}={cur}")
-    cfg = ck["cfg"]
-    actor = TeamActor(adapter.obs_dim_per, adapter.act_dim_per, adapter.n_agents,
+        if int(loaded_dict[key]) != int(current):
+            raise ValueError(f"checkpoint {key}={loaded_dict[key]} != env {key}={current}")
+    cfg = loaded_dict["cfg"]
+    actor = TeamActor(adapter.obs_dim_per, adapter.act_dim_per, adapter.num_agents,
                       int(cfg["tree_depth"]), float(cfg.get("log_std_init", -0.5))).to(device)
-    actor.load_state_dict(ck["actor"])
+    actor.load_state_dict(loaded_dict["actor"])
     actor.eval()
-    obs_norm = RunningMeanStd(adapter.obs_dim_per * adapter.n_agents).to(device)
-    obs_norm.load_state_dict(ck["obs_norm"])
-    known = {f.name for f in fields(SafetyConfig)}
-    safety_cfg = SafetyConfig(**{k: v for k, v in dict(cfg.get("safety", {})).items() if k in known})
+    obs_norm = RunningMeanStd(adapter.obs_dim_per * adapter.num_agents).to(device)
+    obs_norm.load_state_dict(loaded_dict["obs_norm"])
+    known = {item.name for item in fields(SafetyConfig)}
+    safety_cfg = SafetyConfig(**{key: v for key, v in dict(cfg.get("safety", {})).items() if key in known})
     return actor, obs_norm, FormationSafetyModel(safety_cfg), cfg
 
 
@@ -191,21 +191,21 @@ def _board_tilt_m(env) -> np.ndarray:
 
 
 def _board_roll_pitch_deg(env) -> tuple[np.ndarray, np.ndarray]:
-    g_w = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(env.num_envs, 3)
-    g_b = quat_rotate_inverse(env._board.data.root_quat_w, g_w)
-    pitch = torch.asin(g_b[:, 0].clamp(-1.0, 1.0)) * (180.0 / math.pi)
-    roll = torch.asin(g_b[:, 1].clamp(-1.0, 1.0)) * (180.0 / math.pi)
+    gravity_world = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(env.num_envs, 3)
+    gravity_body = quat_rotate_inverse(env._board.data.root_quat_w, gravity_world)
+    pitch = torch.asin(gravity_body[:, 0].clamp(-1.0, 1.0)) * (180.0 / math.pi)
+    roll = torch.asin(gravity_body[:, 1].clamp(-1.0, 1.0)) * (180.0 / math.pi)
     return roll.cpu().numpy(), pitch.cpu().numpy()
 
 
 def _any_fallen(env) -> np.ndarray:
     out = np.zeros(env.num_envs, dtype=bool)
-    g_w = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(env.num_envs, 3)
-    for aid in ALL_ROBOT_IDS:
-        rob = env.robots[aid]
-        low = rob.data.root_pos_w[:, 2] < env.cfg.termination_height
-        g_b = quat_rotate_inverse(rob.data.root_quat_w, g_w)
-        out |= (low | (g_b[:, 0].abs() > 0.7) | (g_b[:, 1].abs() > 0.7)).cpu().numpy()
+    gravity_world = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(env.num_envs, 3)
+    for agent_id in ALL_ROBOT_IDS:
+        robot = env.robots[agent_id]
+        low = robot.data.root_pos_w[:, 2] < env.cfg.termination_height
+        gravity_body = quat_rotate_inverse(robot.data.root_quat_w, gravity_world)
+        out |= (low | (gravity_body[:, 0].abs() > 0.7) | (gravity_body[:, 1].abs() > 0.7)).cpu().numpy()
     return out
 
 
@@ -226,14 +226,14 @@ class EpisodeStats:
     SAFE = ("n_safe", "pviol", "interv", "corr", "nomcorr", "infeas", "active") + tuple(
         f"pviol_{f}" for f in FAMILY_NAMES)
 
-    def __init__(self, n: int):
-        self.n = n
+    def __init__(self, num_envs: int):
+        self.n = num_envs
         for k in self.PHYS + self.SAFE:
-            setattr(self, k, np.zeros(n, dtype=np.float64))
-        self.z_min = np.full(n, np.inf)
-        self.min_h = np.full(n, H_CAP)
-        self.dropped = np.zeros(n, dtype=bool)
-        self.fallen = np.zeros(n, dtype=bool)
+            setattr(self, k, np.zeros(num_envs, dtype=np.float64))
+        self.z_min = np.full(num_envs, np.inf)
+        self.min_h = np.full(num_envs, H_CAP)
+        self.dropped = np.zeros(num_envs, dtype=bool)
+        self.fallen = np.zeros(num_envs, dtype=bool)
 
     def clear(self, i: int) -> None:
         for k in self.PHYS + self.SAFE:
@@ -246,8 +246,8 @@ class EpisodeStats:
 def main():
     toggles = _resolve_env_toggles()
     scene = json.loads(Path(args_cli.scene_json).read_text()) if args_cli.scene_json else None
-    n_eps = args_cli.num_episodes
-    env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=n_eps,
+    num_episodes = args_cli.num_episodes
+    env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=num_episodes,
                             use_fabric=not getattr(args_cli, "disable_fabric", False))
     env_cfg.seed = args_cli.seed
     env_cfg = _configure_env_cfg(env_cfg, toggles, scene)
@@ -262,26 +262,33 @@ def main():
         print(f"[eval] {msg}")
     adapter = IsaacCoopTransportAdapter(env)
     if task_opts.get("partner_noise"):
-        kw = {k: task_opts[f"partner_{k_}"] for k, k_ in (("lin", "noise_lin"), ("yaw_deg", "noise_yaw_deg"),
-                                                          ("gain_lin", "gain_lin"), ("gain_yaw", "gain_yaw"))
-              if task_opts.get(f"partner_{k_}") is not None}
-        adapter.set_partner_perturbation(**kw)
+        partner_kwargs = {
+            k: task_opts[f"partner_{suffix}"]
+            for k, suffix in (
+                ("lin", "noise_lin"),
+                ("yaw_deg", "noise_yaw_deg"),
+                ("gain_lin", "gain_lin"),
+                ("gain_yaw", "gain_yaw"),
+            )
+            if task_opts.get(f"partner_{suffix}") is not None
+        }
+        adapter.set_partner_perturbation(**partner_kwargs)
         print(f"[eval] partner perturbation on {adapter.agent_ids[1]}: {adapter._partner}")
     device = adapter.device
-    actor, obs_norm, safety, ck_cfg = _load_checkpoint(args_cli.checkpoint, adapter, device)
-    variant = str(ck_cfg.get("variant", "?"))
+    actor, obs_norm, safety, ckpt_cfg = _load_checkpoint(args_cli.checkpoint, adapter, device)
+    variant = str(ckpt_cfg.get("variant", "?"))
     shield = (variant != "tree") if args_cli.shield == "auto" else (args_cli.shield == "on")
     scene_name = scene.get("name", Path(args_cli.scene_json).stem) if scene else "training_maze"
-    n_path_wp = max(int(env._path.shape[0]) - 1, 1)
+    num_waypoints = max(int(env._path.shape[0]) - 1, 1)
     max_len = int(env.max_episode_length)
-    drop_h = float(env.cfg.board_drop_height)
+    drop_height = float(env.cfg.board_drop_height)
     if args_cli.soft_tau is not None:
         print(f"[eval] soft routing at tau={args_cli.soft_tau} (not the deployed hard tree)")
     print(f"[eval] variant={variant} shield={'on' if shield else 'off'} scene={scene_name} "
-          f"episodes={n_eps} waypoints={n_path_wp} budget={env_cfg.episode_length_s}s "
+          f"episodes={num_episodes} waypoints={num_waypoints} budget={env_cfg.episode_length_s}s "
           f"spawn={'randomised' if spawn_pool else 'fixed'}")
 
-    S = EpisodeStats(env.num_envs)
+    stats = EpisodeStats(env.num_envs)
     records: list[dict] = []
     recording = False
     orig_reset_idx = env._reset_idx
@@ -293,120 +300,120 @@ def main():
         z = env._board.data.root_pos_w[:, 2].cpu().numpy()
         fallen = _any_fallen(env)
         hit = env._compute_obstacle_collision().cpu().numpy()
-        S.tilt_sum[sel] += tilt[sel]
-        S.tilt_max[sel] = np.maximum(S.tilt_max[sel], tilt[sel])
-        S.roll_max[sel] = np.maximum(S.roll_max[sel], np.abs(roll[sel]))
-        S.pitch_max[sel] = np.maximum(S.pitch_max[sel], np.abs(pitch[sel]))
-        S.z_min[sel] = np.minimum(S.z_min[sel], z[sel])
-        S.n_hl[sel] += 1
-        S.dropped[sel] |= z[sel] < drop_h
-        S.fallen[sel] |= fallen[sel]
-        S.col_steps[sel] += hit[sel].astype(np.float64)
+        stats.tilt_sum[sel] += tilt[sel]
+        stats.tilt_max[sel] = np.maximum(stats.tilt_max[sel], tilt[sel])
+        stats.roll_max[sel] = np.maximum(stats.roll_max[sel], np.abs(roll[sel]))
+        stats.pitch_max[sel] = np.maximum(stats.pitch_max[sel], np.abs(pitch[sel]))
+        stats.z_min[sel] = np.minimum(stats.z_min[sel], z[sel])
+        stats.n_hl[sel] += 1
+        stats.dropped[sel] |= z[sel] < drop_height
+        stats.fallen[sel] |= fallen[sel]
+        stats.col_steps[sel] += hit[sel].astype(np.float64)
 
     def patched_reset_idx(env_ids):
         if recording:
             ids = env_ids.tolist() if torch.is_tensor(env_ids) else list(env_ids)
             acc_phys(ids)
-            succ_flag, loose_flag = episode_flags(env)
+            success_flag, loose_flag = episode_flags(env)
             for i in ids:
                 steps = int(env.episode_length_buf[i].item())
-                nh, ns = max(S.n_hl[i], 1.0), max(S.n_safe[i], 1.0)
-                rec = {
+                num_hl, num_safe = max(stats.n_hl[i], 1.0), max(stats.n_safe[i], 1.0)
+                record = {
                     "env": int(i),
                     "wp": int(env._wp_reached_count[i].item()),
-                    "success": bool(succ_flag[i].item()),
+                    "success": bool(success_flag[i].item()),
                     "success_loose": bool(loose_flag[i].item()),
                     "steps": steps,
                     "timeout": steps >= max_len,
-                    "collision_hl_steps": int(S.col_steps[i]),
-                    "drop": bool(S.dropped[i]),
-                    "fallen": bool(S.fallen[i]),
-                    "tilt_mean_m": float(S.tilt_sum[i] / nh),
-                    "tilt_max_m": float(S.tilt_max[i]),
-                    "roll_abs_max_deg": float(S.roll_max[i]),
-                    "pitch_abs_max_deg": float(S.pitch_max[i]),
-                    "board_z_min": float(S.z_min[i]),
-                    "pviol_nominal": float(S.pviol[i] / ns),
-                    "intervention_rate": float(S.interv[i] / ns),
-                    "correction": float(S.corr[i] / ns),
-                    "nominal_correction": float(S.nomcorr[i] / ns),
-                    "qp_infeasible": float(S.infeas[i] / ns),
-                    "rows_active": float(S.active[i] / ns),
-                    "min_h": float(S.min_h[i]),
+                    "collision_hl_steps": int(stats.col_steps[i]),
+                    "drop": bool(stats.dropped[i]),
+                    "fallen": bool(stats.fallen[i]),
+                    "tilt_mean_m": float(stats.tilt_sum[i] / num_hl),
+                    "tilt_max_m": float(stats.tilt_max[i]),
+                    "roll_abs_max_deg": float(stats.roll_max[i]),
+                    "pitch_abs_max_deg": float(stats.pitch_max[i]),
+                    "board_z_min": float(stats.z_min[i]),
+                    "pviol_nominal": float(stats.pviol[i] / num_safe),
+                    "intervention_rate": float(stats.interv[i] / num_safe),
+                    "correction": float(stats.corr[i] / num_safe),
+                    "nominal_correction": float(stats.nomcorr[i] / num_safe),
+                    "qp_infeasible": float(stats.infeas[i] / num_safe),
+                    "rows_active": float(stats.active[i] / num_safe),
+                    "min_h": float(stats.min_h[i]),
                 }
-                for f in FAMILY_NAMES:
-                    rec[f"pviol_{f}"] = float(getattr(S, f"pviol_{f}")[i] / ns)
-                rec["completion"] = 1.0 if rec["success"] else min(rec["wp"] / n_path_wp, 1.0)
-                rec["reason"] = _fail_reason(rec)
-                records.append(rec)
-                S.clear(i)
+                for family in FAMILY_NAMES:
+                    record[f"pviol_{family}"] = float(getattr(stats, f"pviol_{family}")[i] / num_safe)
+                record["completion"] = 1.0 if record["success"] else min(record["wp"] / num_waypoints, 1.0)
+                record["reason"] = _fail_reason(record)
+                records.append(record)
+                stats.clear(i)
         return orig_reset_idx(env_ids)
 
     env._reset_idx = patched_reset_idx
 
-    obs_raw = adapter.reset()
+    raw_obs = adapter.reset()
     recording = True
     first: dict[int, dict] = {}
     done_first = torch.zeros(env.num_envs, dtype=torch.bool, device=device)
-    leaf_counts = torch.zeros(adapter.n_agents, actor.actors[0].tree.num_leaves, device=device)
-    tol = args_cli.violation_tol
+    leaf_counts = torch.zeros(adapter.num_agents, actor.actors[0].tree.num_leaves, device=device)
+    tolerance = args_cli.violation_tol
 
     for step in range(max_len + 5):
         state = adapter.safety_state()
         if args_cli.soft_tau is None:
-            a_shielded, info = deploy_action(actor, safety, obs_norm, obs_raw, state)
+            shielded_actions, info = deploy_action(actor, safety, obs_norm, raw_obs, state)
         else:
-            a_shielded, info = soft_action(actor, safety, obs_norm, obs_raw, state, args_cli.soft_tau)
-        a_nom = info["a_nom"]
-        a_exec = a_shielded if shield else a_nom
+            shielded_actions, info = soft_action(actor, safety, obs_norm, raw_obs, state, args_cli.soft_tau)
+        nominal_actions = info["a_nom"]
+        actions = shielded_actions if shield else nominal_actions
         with torch.no_grad():
             rows = info["rows"]
-            viol_rows = rows.margins(a_nom) < -tol
-            nomcorr = (a_shielded - a_nom).norm(dim=-1)
-            corr = (a_exec - a_nom).norm(dim=-1)
-            h_min = rows.h.masked_fill(rows.mask <= 0, H_CAP).min(dim=1).values.clamp(max=H_CAP)
+            violated_rows = rows.margins(nominal_actions) < -tolerance
+            nominal_correction = (shielded_actions - nominal_actions).norm(dim=-1)
+            correction = (actions - nominal_actions).norm(dim=-1)
+            min_barrier = rows.barrier.masked_fill(rows.mask <= 0, H_CAP).min(dim=1).values.clamp(max=H_CAP)
             live = ~done_first
-            for n in range(adapter.n_agents):
-                leaf_counts[n] += torch.bincount(info["leaves"][live, n],
+            for agent in range(adapter.num_agents):
+                leaf_counts[agent] += torch.bincount(info["leaves"][live, agent],
                                                  minlength=leaf_counts.shape[1]).float()
-        S.n_safe += 1.0
-        S.pviol += viol_rows.any(1).cpu().numpy()
-        for fi, f in enumerate(FAMILY_NAMES):
-            getattr(S, f"pviol_{f}")[:] += (viol_rows & (rows.family == fi)).any(1).cpu().numpy()
-        S.interv += (corr > 1e-4).cpu().numpy()
-        S.corr += corr.cpu().numpy()
-        S.nomcorr += nomcorr.cpu().numpy()
-        S.infeas += (~info["feasible"]).cpu().numpy()
-        S.active += info["active"].float().sum(1).cpu().numpy()
-        S.min_h = np.minimum(S.min_h, h_min.cpu().numpy())
+        stats.n_safe += 1.0
+        stats.pviol += violated_rows.any(1).cpu().numpy()
+        for family_id, family in enumerate(FAMILY_NAMES):
+            getattr(stats, f"pviol_{family}")[:] += (violated_rows & (rows.family == family_id)).any(1).cpu().numpy()
+        stats.interv += (correction > 1e-4).cpu().numpy()
+        stats.corr += correction.cpu().numpy()
+        stats.nomcorr += nominal_correction.cpu().numpy()
+        stats.infeas += (~info["feasible"]).cpu().numpy()
+        stats.active += info["active"].float().sum(1).cpu().numpy()
+        stats.min_h = np.minimum(stats.min_h, min_barrier.cpu().numpy())
 
-        obs_raw, _r, _done, _log = adapter.step(a_exec)
+        raw_obs, _r, _done, _log = adapter.step(actions)
         acc_phys()
-        for r in records:
-            if r["env"] not in first:
-                first[r["env"]] = r
-                done_first[r["env"]] = True
+        for row in records:
+            if row["env"] not in first:
+                first[row["env"]] = row
+                done_first[row["env"]] = True
         records.clear()
-        if len(first) >= n_eps:
+        if len(first) >= num_episodes:
             break
         if (step + 1) % 50 == 0:
-            print(f"[eval] hl-step {step + 1}: {len(first)}/{n_eps} episodes finished", flush=True)
+            print(f"[eval] hl-step {step + 1}: {len(first)}/{num_episodes} episodes finished", flush=True)
 
-    rows_out = [first[k] for k in sorted(first)]
-    if not rows_out:
+    episode_rows = [first[k] for k in sorted(first)]
+    if not episode_rows:
         raise RuntimeError("no episode finished within the step budget")
 
-    def arr(k):
-        return np.array([float(r[k]) for r in rows_out], dtype=np.float64)
+    def arr(key):
+        return np.array([float(row[key]) for row in episode_rows], dtype=np.float64)
 
-    def ms(k):
-        a = arr(k)
-        return {"mean": float(a.mean()), "std": float(a.std(ddof=1)) if len(a) > 1 else 0.0}
+    def ms(key):
+        values = arr(key)
+        return {"mean": float(values.mean()), "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0}
 
     summary = {
         "checkpoint": str(args_cli.checkpoint), "variant": variant, "shield": shield,
         "routing": "hard" if args_cli.soft_tau is None else f"soft(tau={args_cli.soft_tau})",
-        "scene": scene_name, "episodes": len(rows_out), "n_path_wp": n_path_wp,
+        "scene": scene_name, "episodes": len(episode_rows), "n_path_wp": num_waypoints,
         "seed": args_cli.seed, "env_toggles": toggles, "spawn": "randomised" if spawn_pool else "fixed",
         "success_mode": task_opts.get("success_mode") or "loose",
         "success_rate": float(arr("success").mean()),
@@ -417,23 +424,25 @@ def main():
         "drop_episode_rate": float(arr("drop").mean()),
         "fallen_episode_rate": float(arr("fallen").mean()),
         "timeout_episode_rate": float(arr("timeout").mean()),
-        "fail_split": {k: sum(1 for r in rows_out if r["reason"] == k)
+        "fail_split": {k: sum(1 for row in episode_rows if row["reason"] == k)
                        for k in ("success", "drop", "fallen", "timeout", "other")},
         "tilt_mean_m": ms("tilt_mean_m"), "tilt_max_m": ms("tilt_max_m"),
         "steps": ms("steps"),
     }
     for k in ("pviol_nominal", "intervention_rate", "correction", "nominal_correction",
-              "qp_infeasible", "rows_active", "min_h") + tuple(f"pviol_{f}" for f in FAMILY_NAMES):
+              "qp_infeasible", "rows_active", "min_h") + tuple(f"pviol_{family}" for family in FAMILY_NAMES):
         summary[k] = ms(k)
-    occ = leaf_counts / leaf_counts.sum(dim=1, keepdim=True).clamp(min=1.0)
-    summary["leaf_occupancy"] = {f"carrier_{n}": [round(float(v), 4) for v in occ[n]]
-                                 for n in range(adapter.n_agents)}
-    summary["leaves_used"] = {f"carrier_{n}": int((occ[n] > 0).sum()) for n in range(adapter.n_agents)}
+    occupancy = leaf_counts / leaf_counts.sum(dim=1, keepdim=True).clamp(min=1.0)
+    summary["leaf_occupancy"] = {f"carrier_{agent}": [round(float(v), 4) for v in occupancy[agent]]
+                                 for agent in range(adapter.num_agents)}
+    summary["leaves_used"] = {
+        f"carrier_{agent}": int((occupancy[agent] > 0).sum()) for agent in range(adapter.num_agents)
+    }
 
     print("\n===== SAGE deployment evaluation =====")
     print(f"checkpoint: {args_cli.checkpoint}")
     print(f"variant: {variant} | shield: {'on' if shield else 'off'} | scene: {scene_name} | "
-          f"episodes: {len(rows_out)} | seed: {args_cli.seed}")
+          f"episodes: {len(episode_rows)} | seed: {args_cli.seed}")
     print(f"success rate ({summary['success_mode']}): {summary['success_rate']:.3f}   "
           f"loose: {summary['success_rate_loose']:.3f}   completion: {summary['completion']['mean']:.3f}"
           f" ± {summary['completion']['std']:.3f}")
@@ -441,7 +450,7 @@ def main():
           f"   fallen: {summary['fallen_episode_rate']:.3f}   timeout: {summary['timeout_episode_rate']:.3f}")
     print(f"fail split: {summary['fail_split']}")
     print(f"PViol(a_nom): {summary['pviol_nominal']['mean']:.3f}   "
-          + "  ".join(f"{f}={summary[f'pviol_{f}']['mean']:.3f}" for f in FAMILY_NAMES))
+          + "  ".join(f"{family}={summary[f'pviol_{family}']['mean']:.3f}" for family in FAMILY_NAMES))
     print(f"||Q(a_nom)-a_nom||: {summary['nominal_correction']['mean']:.4f}   "
           f"||a_exec-a_nom||: {summary['correction']['mean']:.4f}   "
           f"intervention rate: {summary['intervention_rate']['mean']:.3f}")
@@ -454,7 +463,7 @@ def main():
     if args_cli.out:
         out = Path(args_cli.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"summary": summary, "episodes": rows_out}, indent=2))
+        out.write_text(json.dumps({"summary": summary, "episodes": episode_rows}, indent=2))
         print(f"[eval] wrote {out}")
     gym_env.close()
 

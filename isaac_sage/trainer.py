@@ -91,9 +91,9 @@ class SAGEConfig:
         return rule
 
 
-def _linear(frac: float, v0: float, v1: float, s: float, e: float) -> float:
-    a = min(1.0, max(0.0, (frac - s) / max(e - s, 1e-9)))
-    return v0 + a * (v1 - v0)
+def _schedule(progress: float, start_value: float, end_value: float, start: float, end: float) -> float:
+    weight = min(1.0, max(0.0, (progress - start) / max(end - start, 1e-9)))
+    return start_value + weight * (end_value - start_value)
 
 
 class RunningMeanStd(torch.nn.Module):
@@ -111,353 +111,412 @@ class RunningMeanStd(torch.nn.Module):
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @torch.no_grad()
-    def reset_dims(self, idx) -> None:
-        self.mean[idx], self.var[idx], self.count[idx] = 0.0, 1.0, self.eps
+    def reset_dims(self, dims) -> None:
+        self.mean[dims], self.var[dims], self.count[dims] = 0.0, 1.0, self.eps
 
     @torch.no_grad()
     def update(self, x: Tensor) -> None:
-        bm, bv, bc = x.mean(0), x.var(0, unbiased=False), float(x.shape[0])
-        delta = bm - self.mean
-        tot = self.count + bc
-        self.mean += delta * bc / tot
-        m_a, m_b = self.var * self.count, bv * bc
-        self.var = (m_a + m_b + delta ** 2 * self.count * bc / tot) / tot
-        self.count = tot
+        batch_mean, batch_var, batch_count = x.mean(0), x.var(0, unbiased=False), float(x.shape[0])
+        delta = batch_mean - self.mean
+        total = self.count + batch_count
+        self.mean += delta * batch_count / total
+        old_m2, batch_m2 = self.var * self.count, batch_var * batch_count
+        self.var = (old_m2 + batch_m2 + delta ** 2 * self.count * batch_count / total) / total
+        self.count = total
 
     def normalize(self, x: Tensor) -> Tensor:
         return ((x - self.mean) / torch.sqrt(self.var + 1e-8)).clamp(-10.0, 10.0)
 
 
-class Rollout:
-    def __init__(self, T: int, B: int, obs_dim: int, da: int, K: int, N: int, device):
-        z = lambda *s, **k: torch.zeros(*s, device=device, **k)
-        self.obs, self.next_obs = z(T, B, obs_dim), z(T, B, obs_dim)
-        self.C, self.c, self.mask = z(T, B, K, da), z(T, B, K), z(T, B, K)
-        self.a_prop, self.a_exec = z(T, B, da), z(T, B, da)
-        self.logp = z(T, B, N)
-        self.values, self.rewards = z(T, B), z(T, B)
-        self.vpred = z(T, B)
-        self.dones = z(T, B, dtype=torch.bool)
-        self.T, self.B = T, B
+class RolloutStorage:
+    def __init__(
+        self,
+        num_steps: int,
+        num_envs: int,
+        obs_dim: int,
+        act_dim: int,
+        num_rows: int,
+        num_agents: int,
+        device,
+    ):
+        zeros = lambda *shape, **kwargs: torch.zeros(*shape, device=device, **kwargs)
+        self.obs, self.next_obs = zeros(num_steps, num_envs, obs_dim), zeros(num_steps, num_envs, obs_dim)
+        self.row_coef, self.row_bound, self.row_mask = (
+            zeros(num_steps, num_envs, num_rows, act_dim),
+            zeros(num_steps, num_envs, num_rows),
+            zeros(num_steps, num_envs, num_rows),
+        )
+        self.proposals, self.actions = zeros(num_steps, num_envs, act_dim), zeros(num_steps, num_envs, act_dim)
+        self.log_probs = zeros(num_steps, num_envs, num_agents)
+        self.values, self.rewards = zeros(num_steps, num_envs), zeros(num_steps, num_envs)
+        self.value_preds = zeros(num_steps, num_envs)
+        self.dones = zeros(num_steps, num_envs, dtype=torch.bool)
+        self.num_steps, self.num_envs = num_steps, num_envs
 
-    def rows(self, idx: Tensor) -> RowSet:
-        C, c, m = (x.reshape(self.T * self.B, *x.shape[2:])[idx] for x in (self.C, self.c, self.mask))
-        return RowSet(C, c, m, torch.zeros_like(c), torch.zeros_like(c, dtype=torch.long))
+    def rows(self, index: Tensor) -> RowSet:
+        coef, bound, mask = (
+            x.reshape(self.num_steps * self.num_envs, *x.shape[2:])[index]
+            for x in (self.row_coef, self.row_bound, self.row_mask)
+        )
+        return RowSet(coef, bound, mask, torch.zeros_like(bound), torch.zeros_like(bound, dtype=torch.long))
 
 
-def gae(rewards: Tensor, values: Tensor, dones: Tensor, last_v: Tensor, gamma: float, lam: float):
-    T = rewards.shape[0]
-    adv = torch.zeros_like(rewards)
-    run = torch.zeros_like(last_v)
-    for t in reversed(range(T)):
-        nv = last_v if t == T - 1 else values[t + 1]
-        nt = (~dones[t]).float()
-        delta = rewards[t] + gamma * nv * nt - values[t]
-        run = delta + gamma * lam * nt * run
-        adv[t] = run
-    return adv, adv + values
+def compute_gae(rewards: Tensor, values: Tensor, dones: Tensor, last_values: Tensor, gamma: float, lam: float):
+    num_steps = rewards.shape[0]
+    advantages = torch.zeros_like(rewards)
+    running = torch.zeros_like(last_values)
+    for step in reversed(range(num_steps)):
+        next_values = last_values if step == num_steps - 1 else values[step + 1]
+        not_done = (~dones[step]).float()
+        delta = rewards[step] + gamma * next_values * not_done - values[step]
+        running = delta + gamma * lam * not_done * running
+        advantages[step] = running
+    return advantages, advantages + values
 
 
 class SAGETrainer:
     def __init__(self, adapter, cfg: SAGEConfig, device: torch.device):
         self.env, self.cfg, self.device = adapter, cfg, device
         self.use_cbf, self.use_sail, self.use_talo = cfg.flags()
-        self.N = adapter.n_agents
-        self.do, self.da_i = adapter.obs_dim_per, adapter.act_dim_per
-        self.obs_dim, self.da = self.do * self.N, self.da_i * self.N
-        self.B = adapter.num_envs
+        self.num_agents = adapter.num_agents
+        self.obs_dim_per, self.act_dim_per = adapter.obs_dim_per, adapter.act_dim_per
+        self.obs_dim, self.act_dim = self.obs_dim_per * self.num_agents, self.act_dim_per * self.num_agents
+        self.num_envs = adapter.num_envs
 
-        self.actor = TeamActor(self.do, self.da_i, self.N, cfg.tree_depth, cfg.log_std_init).to(device)
+        self.actor = TeamActor(
+            self.obs_dim_per, self.act_dim_per, self.num_agents, cfg.tree_depth, cfg.log_std_init
+        ).to(device)
         self.critic_kind = cfg.critic_kind()
-        self.actor_rule = cfg.actor_update_rule()
+        self.actor_update = cfg.actor_update_rule()
         if self.critic_kind == "team":
-            self.critic = TeamContextCritic(self.do, self.N, cfg.context_dim, cfg.critic_hidden).to(device)
+            self.critic = TeamContextCritic(
+                self.obs_dim_per, self.num_agents, cfg.context_dim, cfg.critic_hidden
+            ).to(device)
         else:
-            self.critic = JointCritic(self.do, self.N).to(device)
+            self.critic = JointCritic(self.obs_dim_per, self.num_agents).to(device)
         self.value_norm = ValueNorm().to(device) if self.critic_kind == "joint" else None
         self._critic_warmup_left = 0
-        self.opt_a = Adam(self.actor.parameters(), lr=cfg.actor_lr)
-        self.opt_c = Adam(self.critic.parameters(), lr=cfg.critic_lr)
+        self.actor_optimizer = Adam(self.actor.parameters(), lr=cfg.actor_lr)
+        self.critic_optimizer = Adam(self.critic.parameters(), lr=cfg.critic_lr)
         self.obs_norm = RunningMeanStd(self.obs_dim).to(device)
         self.safety = FormationSafetyModel(cfg.safety)
-        self.K = cfg.safety.max_rows
-        self.buf = Rollout(cfg.num_steps, self.B, self.obs_dim, self.da, self.K, self.N, device)
+        self.num_rows = cfg.safety.max_rows
+        self.storage = RolloutStorage(
+            cfg.num_steps, self.num_envs, self.obs_dim, self.act_dim, self.num_rows, self.num_agents, device
+        )
 
         self.total_steps = 0
         self.best_return = float("-inf")
         self.tau, self.kappa = cfg.tau_init, cfg.kappa_init
-        self.hard = cfg.hard_finetune_fraction >= 1.0
-        self._hard_switched = self.hard
+        self.hard_routing = cfg.hard_finetune_fraction >= 1.0
+        self._hard_switched = self.hard_routing
         self._obs: Optional[Tensor] = None
-        self._ep_ret = torch.zeros(self.B, device=device)
-        self.last_env_log: dict[str, float] = {}
+        self._episode_returns = torch.zeros(self.num_envs, device=device)
+        self.env_log: dict[str, float] = {}
 
-    def set_progress(self, frac: float) -> None:
-        c = self.cfg
-        self.tau = _linear(frac, c.tau_init, c.tau_final, c.tau_anneal_start, c.tau_anneal_end)
-        self.kappa = _linear(frac, c.kappa_init, c.kappa_final, c.kappa_anneal_start, c.kappa_anneal_end)
-        self.hard = c.hard_finetune_fraction > 0.0 and frac >= 1.0 - c.hard_finetune_fraction
-        if self.hard and not self._hard_switched:
+    def set_progress(self, progress: float) -> None:
+        cfg = self.cfg
+        self.tau = _schedule(progress, cfg.tau_init, cfg.tau_final, cfg.tau_anneal_start, cfg.tau_anneal_end)
+        self.kappa = _schedule(progress, cfg.kappa_init, cfg.kappa_final, cfg.kappa_anneal_start, cfg.kappa_anneal_end)
+        self.hard_routing = cfg.hard_finetune_fraction > 0.0 and progress >= 1.0 - cfg.hard_finetune_fraction
+        if self.hard_routing and not self._hard_switched:
             self._switch_to_hard(scale_lr=True)
 
     def _switch_to_hard(self, scale_lr: bool) -> None:
         if self.cfg.freeze_routing_on_hard:
-            for a in self.actor.actors:
-                a.tree.split_w.requires_grad_(False)
-                a.tree.split_b.requires_grad_(False)
+            for actor in self.actor.actors:
+                actor.tree.split_w.requires_grad_(False)
+                actor.tree.split_b.requires_grad_(False)
         if scale_lr and self.cfg.hard_lr_scale != 1.0:
-            for g in self.opt_a.param_groups:
-                g["lr"] *= self.cfg.hard_lr_scale
+            for group in self.actor_optimizer.param_groups:
+                group["lr"] *= self.cfg.hard_lr_scale
         self._hard_switched = True
         print(f"[SAGE] hard routing on: routing frozen={self.cfg.freeze_routing_on_hard} "
-              f"actor lr={self.opt_a.param_groups[0]['lr']:.2e}", flush=True)
+              f"actor lr={self.actor_optimizer.param_groups[0]['lr']:.2e}", flush=True)
 
-    def _value(self, v_raw: Tensor) -> Tensor:
-        return v_raw if self.value_norm is None else self.value_norm.denormalize(v_raw)
+    def _denormalize_value(self, raw_values: Tensor) -> Tensor:
+        return raw_values if self.value_norm is None else self.value_norm.denormalize(raw_values)
 
-    def _value_loss(self, v: Tensor, vpred_old: Tensor, ret: Tensor) -> Tensor:
+    def _value_loss(self, values: Tensor, old_values: Tensor, returns: Tensor) -> Tensor:
         if self.value_norm is None:
-            return F.mse_loss(v, ret)
-        self.value_norm.update(ret)
-        target = self.value_norm.normalize(ret)
-        v_clipped = vpred_old + (v - vpred_old).clamp(-self.cfg.clip_eps, self.cfg.clip_eps)
-        d = self.cfg.value_huber_delta
-        return torch.max(huber_loss(target - v, d), huber_loss(target - v_clipped, d)).mean()
+            return F.mse_loss(values, returns)
+        self.value_norm.update(returns)
+        target = self.value_norm.normalize(returns)
+        clipped_values = old_values + (values - old_values).clamp(-self.cfg.clip_eps, self.cfg.clip_eps)
+        delta = self.cfg.value_huber_delta
+        return torch.max(huber_loss(target - values, delta), huber_loss(target - clipped_values, delta)).mean()
 
-    def _proposal_centre(self, a_st: Tensor, rows: RowSet) -> Tensor:
+    def _proposal_mean(self, nominal_actions: Tensor, rows: RowSet) -> Tensor:
         if self.use_sail and self.use_cbf:
-            return sail_penalty_map(a_st, rows, self.kappa, self.cfg.sail_newton_steps, self.cfg.sail_damping)
-        return a_st
+            return sail_penalty_map(
+                nominal_actions, rows, self.kappa, self.cfg.sail_newton_steps, self.cfg.sail_damping
+            )
+        return nominal_actions
 
     @torch.no_grad()
     def collect(self) -> dict[str, float]:
-        cfg, buf = self.cfg, self.buf
+        cfg, storage = self.cfg, self.storage
         if self._obs is None:
-            raw = self.env.reset()
-            self.obs_norm.update(raw)
-            self._obs = self.obs_norm.normalize(raw)
+            raw_obs = self.env.reset()
+            self.obs_norm.update(raw_obs)
+            self._obs = self.obs_norm.normalize(raw_obs)
         obs = self._obs
-        acc: dict[str, float] = {}
-        ep_returns: list[float] = []
+        sums: dict[str, float] = {}
+        episode_returns: list[float] = []
 
-        def _acc(k, v):
-            acc[k] = acc.get(k, 0.0) + float(v)
+        def _accumulate(key, value):
+            sums[key] = sums.get(key, 0.0) + float(value)
 
-        for t in range(cfg.num_steps):
+        for step in range(cfg.num_steps):
             state: SafetyState = self.env.safety_state()
             rows = self.safety.rows(state)
-            a_st = self.actor.nominal_st(obs, self.tau, hard=self.hard)
-            a_bar = self._proposal_centre(a_st, rows)
-            a_prop, logp = self.actor.sample_proposals(a_bar)
+            nominal_actions = self.actor.nominal_st(obs, self.tau, hard=self.hard_routing)
+            proposal_mean = self._proposal_mean(nominal_actions, rows)
+            proposals, log_probs = self.actor.sample_proposals(proposal_mean)
             if self.use_cbf:
-                a_exec, qp = self.safety.exact_projection(a_prop, rows)
-                _acc("qp_infeasible", (~qp["feasible"]).float().mean())
-                _acc("correction", qp["correction"].mean())
-                _acc("rows_active", qp["active"].float().sum(1).mean())
+                actions, qp_info = self.safety.exact_projection(proposals, rows)
+                _accumulate("qp_infeasible", (~qp_info["feasible"]).float().mean())
+                _accumulate("correction", qp_info["correction"].mean())
+                _accumulate("rows_active", qp_info["active"].float().sum(1).mean())
                 if cfg.log_nominal_correction:
-                    a_nom_exec, _ = self.safety.exact_projection(a_st, rows)
-                    _acc("nominal_correction", (a_nom_exec - a_st).norm(dim=-1).mean())
+                    projected_nominal, _ = self.safety.exact_projection(nominal_actions, rows)
+                    _accumulate("nominal_correction", (projected_nominal - nominal_actions).norm(dim=-1).mean())
             else:
-                a_exec = a_prop.clamp(-1.0, 1.0)
-            finite = torch.isfinite(a_exec).all(dim=-1)
+                actions = proposals.clamp(-1.0, 1.0)
+            finite = torch.isfinite(actions).all(dim=-1)
             if not bool(finite.all()):
-                a_exec = torch.where(finite.unsqueeze(-1), a_exec, torch.zeros_like(a_exec))
-            _acc("nonfinite_actions", (~finite).float().mean())
-            _acc("pviol_nominal", rows.violated(a_st).float().mean())
-            _acc("pviol_proposal", rows.violated(a_prop).float().mean())
-            _acc("rows_present", rows.mask.sum(1).mean())
-            _acc("min_h", rows.h.masked_fill(rows.mask <= 0, float("inf")).min(1).values.clamp(max=5.0).mean())
-            v_raw = self.critic(obs)
-            v = self._value(v_raw)
-            buf.vpred[t] = v_raw
+                actions = torch.where(finite.unsqueeze(-1), actions, torch.zeros_like(actions))
+            _accumulate("nonfinite_actions", (~finite).float().mean())
+            _accumulate("pviol_nominal", rows.violated(nominal_actions).float().mean())
+            _accumulate("pviol_proposal", rows.violated(proposals).float().mean())
+            _accumulate("rows_present", rows.mask.sum(1).mean())
+            _accumulate(
+                "min_h",
+                rows.barrier.masked_fill(rows.mask <= 0, float("inf")).min(1).values.clamp(max=5.0).mean(),
+            )
+            raw_values = self.critic(obs)
+            values = self._denormalize_value(raw_values)
+            storage.value_preds[step] = raw_values
 
-            next_raw, r, done, log = self.env.step(a_exec)
-            self.obs_norm.update(next_raw)
-            next_obs = self.obs_norm.normalize(next_raw)
+            next_raw_obs, rewards, dones, env_log = self.env.step(actions)
+            self.obs_norm.update(next_raw_obs)
+            next_obs = self.obs_norm.normalize(next_raw_obs)
 
-            buf.obs[t], buf.next_obs[t] = obs, next_obs
-            buf.C[t], buf.c[t], buf.mask[t] = rows.C, rows.c, rows.mask
-            buf.a_prop[t], buf.a_exec[t], buf.logp[t] = a_prop, a_exec, logp
-            buf.values[t], buf.rewards[t], buf.dones[t] = v, r, done
+            storage.obs[step], storage.next_obs[step] = obs, next_obs
+            storage.row_coef[step], storage.row_bound[step], storage.row_mask[step] = rows.coef, rows.bound, rows.mask
+            storage.proposals[step], storage.actions[step], storage.log_probs[step] = proposals, actions, log_probs
+            storage.values[step], storage.rewards[step], storage.dones[step] = values, rewards, dones
 
-            self._ep_ret += r
-            if done.any():
-                ep_returns.extend(self._ep_ret[done].tolist())
-                self._ep_ret[done] = 0.0
-            for k, val in (log or {}).items():
+            self._episode_returns += rewards
+            if dones.any():
+                episode_returns.extend(self._episode_returns[dones].tolist())
+                self._episode_returns[dones] = 0.0
+            for key, value in (env_log or {}).items():
                 try:
-                    _acc("env/" + k, float(val))
+                    _accumulate("env/" + key, float(value))
                 except (TypeError, ValueError):
                     pass
             obs = next_obs
 
         self._obs = obs
-        last_v = self._value(self.critic(obs))
-        self.adv, self.ret = gae(buf.rewards, buf.values, buf.dones, last_v, cfg.gamma, cfg.gae_lambda)
-        self.total_steps += cfg.num_steps * self.B
-        out = {k: v / cfg.num_steps for k, v in acc.items()}
-        out["episode_return"] = float(np.mean(ep_returns)) if ep_returns else float("nan")
-        out["num_episodes"] = float(len(ep_returns))
-        self.last_env_log = out
-        return out
+        last_values = self._denormalize_value(self.critic(obs))
+        self.advantages, self.returns = compute_gae(
+            storage.rewards, storage.values, storage.dones, last_values, cfg.gamma, cfg.gae_lambda
+        )
+        self.total_steps += cfg.num_steps * self.num_envs
+        stats = {key: values / cfg.num_steps for key, values in sums.items()}
+        stats["episode_return"] = float(np.mean(episode_returns)) if episode_returns else float("nan")
+        stats["num_episodes"] = float(len(episode_returns))
+        self.env_log = stats
+        return stats
 
-    def _surrogates(self, o: Tensor, rows: RowSet, a_prop: Tensor, logp_old: Tensor, adv: Tensor):
+    def _objectives(self, obs: Tensor, rows: RowSet, proposals: Tensor, old_log_probs: Tensor, advantages: Tensor):
         cfg = self.cfg
 
         def clipped(ratio: Tensor) -> Tensor:
-            return torch.minimum(ratio * adv, ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps) * adv).mean()
+            return torch.minimum(
+                ratio * advantages, ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages
+            ).mean()
 
-        L_ind = []
-        for i in range(self.N):
-            a_st, regs = self.actor.nominal_st(o, self.tau, detach_except=i, hard=self.hard, return_reg=True)
-            a_bar = self._proposal_centre(a_st, rows)
-            lp = self.actor.log_prob_i(i, a_bar, a_prop)
-            L_i = clipped(torch.exp(lp - logp_old[:, i])) - cfg.lambda_tree * regs[i]
+        agent_objectives = []
+        for i in range(self.num_agents):
+            nominal_actions, regs = self.actor.nominal_st(
+                obs, self.tau, detach_except=i, hard=self.hard_routing, return_reg=True
+            )
+            proposal_mean = self._proposal_mean(nominal_actions, rows)
+            log_prob = self.actor.agent_log_prob(i, proposal_mean, proposals)
+            objective = clipped(torch.exp(log_prob - old_log_probs[:, i])) - cfg.lambda_tree * regs[i]
             if cfg.entropy_coef > 0:
-                L_i = L_i + cfg.entropy_coef * self.actor.actors[i].proposal(
-                    self.actor.act_i(a_bar, i)).entropy().mean()
-            L_ind.append(L_i)
-        a_st, regs = self.actor.nominal_st(o, self.tau, hard=self.hard, return_reg=True)
-        a_bar = self._proposal_centre(a_st, rows)
-        lp_team = sum(self.actor.log_prob_i(i, a_bar, a_prop) for i in range(self.N))
+                objective = objective + cfg.entropy_coef * self.actor.actors[i].proposal(
+                    self.actor.agent_action(proposal_mean, i)).entropy().mean()
+            agent_objectives.append(objective)
+        nominal_actions, regs = self.actor.nominal_st(obs, self.tau, hard=self.hard_routing, return_reg=True)
+        proposal_mean = self._proposal_mean(nominal_actions, rows)
+        team_log_prob = sum(self.actor.agent_log_prob(i, proposal_mean, proposals) for i in range(self.num_agents))
         tree_reg = sum(regs)
-        L_team = clipped(torch.exp(lp_team - logp_old.sum(1))) - cfg.lambda_tree * tree_reg
-        return L_ind, L_team, tree_reg.detach()
+        team_objective = clipped(torch.exp(team_log_prob - old_log_probs.sum(1))) - cfg.lambda_tree * tree_reg
+        return agent_objectives, team_objective, tree_reg.detach()
 
     @torch.no_grad()
-    def _logp_carrier(self, i: int, obs: Tensor, rows: RowSet, a_prop: Tensor) -> Tensor:
-        a_bar = self._proposal_centre(self.actor.nominal_st(obs, self.tau, hard=self.hard), rows)
-        return self.actor.log_prob_i(i, a_bar, a_prop)
+    def _agent_log_prob(self, i: int, obs: Tensor, rows: RowSet, proposals: Tensor) -> Tensor:
+        proposal_mean = self._proposal_mean(self.actor.nominal_st(obs, self.tau, hard=self.hard_routing), rows)
+        return self.actor.agent_log_prob(i, proposal_mean, proposals)
 
-    def _update_happo(self, obs: Tensor, a_prop: Tensor, logp_old: Tensor, adv: Tensor,
-                      ret: Tensor, vpred_old: Tensor, actor_frozen: bool) -> dict[str, float]:
-        cfg, buf = self.cfg, self.buf
-        n = obs.shape[0]
-        mb = max(n // cfg.num_minibatches, 1)
-        rows_all = buf.rows(torch.arange(n, device=self.device))
+    def _update_happo(self, obs: Tensor, proposals: Tensor, old_log_probs: Tensor, advantages: Tensor,
+                      returns: Tensor, old_values: Tensor, actor_frozen: bool) -> dict[str, float]:
+        cfg, storage = self.cfg, self.storage
+        num_samples = obs.shape[0]
+        batch_size = max(num_samples // cfg.num_minibatches, 1)
+        all_rows = storage.rows(torch.arange(num_samples, device=self.device))
         stats: dict[str, float] = {}
         counts: dict[str, int] = {}
 
-        def _acc(d: dict):
-            for k, v in d.items():
-                stats[k] = stats.get(k, 0.0) + float(v)
-                counts[k] = counts.get(k, 0) + 1
+        def _accumulate(values: dict):
+            for key, value in values.items():
+                stats[key] = stats.get(key, 0.0) + float(value)
+                counts[key] = counts.get(key, 0) + 1
 
         if not actor_frozen:
-            factor = torch.ones(n, device=self.device)
-            order = torch.randperm(self.N).tolist()
-            for m, i in enumerate(order):
-                params_i = [p for p in self.actor.actors[i].parameters() if p.requires_grad]
-                lp_before = self._logp_carrier(i, obs, rows_all, a_prop)
+            factor = torch.ones(num_samples, device=self.device)
+            order = torch.randperm(self.num_agents).tolist()
+            for position, i in enumerate(order):
+                agent_params = [p for p in self.actor.actors[i].parameters() if p.requires_grad]
+                old_log_prob = self._agent_log_prob(i, obs, all_rows, proposals)
                 for _ in range(cfg.ppo_epochs):
-                    perm = torch.randperm(n, device=self.device)
-                    for s in range(0, n, mb):
-                        idx = perm[s:s + mb]
-                        rows = buf.rows(idx)
-                        if m == 0:
-                            L_ind, L_team, tree_reg = self._surrogates(
-                                obs[idx], rows, a_prop[idx], logp_old[idx], adv[idx])
-                            _, ts = talo_update_field(L_ind, L_team, list(self.actor.parameters()),
-                                                      cfg.talo_sigma, cfg.talo_eps, enabled=False)
-                            _acc({"W_gap": ts["W_gap"], "cos_align": ts["cos_align"],
-                                  "g_ind_norm": ts["g_ind_norm"], "g_team_norm": ts["g_team_norm"],
-                                  "L_ind": float(sum(L_ind).detach()), "L_team": float(L_team.detach()),
-                                  "tree_reg": float(tree_reg)})
-                        a_st, regs = self.actor.nominal_st(obs[idx], self.tau, detach_except=i,
-                                                           hard=self.hard, return_reg=True)
-                        a_bar = self._proposal_centre(a_st, rows)
-                        lp = self.actor.log_prob_i(i, a_bar, a_prop[idx])
-                        ratio = torch.exp(lp - logp_old[idx, i])
-                        surr = torch.minimum(ratio * adv[idx],
-                                             ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps) * adv[idx])
-                        obj = (factor[idx] * surr).mean() - cfg.lambda_tree * regs[i]
+                    perm = torch.randperm(num_samples, device=self.device)
+                    for start in range(0, num_samples, batch_size):
+                        idx = perm[start:start + batch_size]
+                        rows = storage.rows(idx)
+                        if position == 0:
+                            agent_objectives, team_objective, tree_reg = self._objectives(
+                                obs[idx], rows, proposals[idx], old_log_probs[idx], advantages[idx])
+                            _, talo_stats = talo_update_field(
+                                agent_objectives,
+                                team_objective,
+                                list(self.actor.parameters()),
+                                cfg.talo_sigma,
+                                cfg.talo_eps,
+                                enabled=False,
+                            )
+                            _accumulate(
+                                {
+                                    "W_gap": talo_stats["W_gap"],
+                                    "cos_align": talo_stats["cos_align"],
+                                    "g_ind_norm": talo_stats["g_ind_norm"],
+                                    "g_team_norm": talo_stats["g_team_norm"],
+                                    "L_ind": float(sum(agent_objectives).detach()),
+                                    "L_team": float(team_objective.detach()),
+                                    "tree_reg": float(tree_reg),
+                                }
+                            )
+                        nominal_actions, regs = self.actor.nominal_st(obs[idx], self.tau, detach_except=i,
+                                                           hard=self.hard_routing, return_reg=True)
+                        proposal_mean = self._proposal_mean(nominal_actions, rows)
+                        log_prob = self.actor.agent_log_prob(i, proposal_mean, proposals[idx])
+                        ratio = torch.exp(log_prob - old_log_probs[idx, i])
+                        surrogate = torch.minimum(ratio * advantages[idx],
+                                             ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages[idx])
+                        objective = (factor[idx] * surrogate).mean() - cfg.lambda_tree * regs[i]
                         if cfg.entropy_coef > 0:
-                            obj = obj + cfg.entropy_coef * self.actor.actors[i].proposal(
-                                self.actor.act_i(a_bar, i)).entropy().mean()
-                        self.opt_a.zero_grad(set_to_none=True)
-                        (-obj).backward()
-                        step_norm = torch.nn.utils.clip_grad_norm_(params_i, cfg.max_grad_norm)
-                        self.opt_a.step()
-                        _acc({"step_norm": float(step_norm),
-                              "step_clipped": float(step_norm > cfg.max_grad_norm),
+                            objective = objective + cfg.entropy_coef * self.actor.actors[i].proposal(
+                                self.actor.agent_action(proposal_mean, i)).entropy().mean()
+                        self.actor_optimizer.zero_grad(set_to_none=True)
+                        (-objective).backward()
+                        grad_norm = torch.nn.utils.clip_grad_norm_(agent_params, cfg.max_grad_norm)
+                        self.actor_optimizer.step()
+                        _accumulate({"step_norm": float(grad_norm),
+                              "step_clipped": float(grad_norm > cfg.max_grad_norm),
                               "happo_ratio": float(ratio.detach().mean())})
-                lp_after = self._logp_carrier(i, obs, rows_all, a_prop)
-                factor = (factor * torch.exp(lp_after - lp_before)).detach()
+                new_log_prob = self._agent_log_prob(i, obs, all_rows, proposals)
+                factor = (factor * torch.exp(new_log_prob - old_log_prob)).detach()
             stats["happo_factor_mean"], counts["happo_factor_mean"] = float(factor.mean()), 1
             stats["happo_factor_std"], counts["happo_factor_std"] = float(factor.std()), 1
 
         for _ in range(cfg.ppo_epochs):
-            perm = torch.randperm(n, device=self.device)
-            for s in range(0, n, mb):
-                idx = perm[s:s + mb]
-                lv = self._value_loss(self.critic(obs[idx]), vpred_old[idx], ret[idx])
-                self.opt_c.zero_grad(set_to_none=True)
-                lv.backward()
+            perm = torch.randperm(num_samples, device=self.device)
+            for start in range(0, num_samples, batch_size):
+                idx = perm[start:start + batch_size]
+                value_loss = self._value_loss(self.critic(obs[idx]), old_values[idx], returns[idx])
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                value_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.max_grad_norm)
-                self.opt_c.step()
-                _acc({"value_loss": float(lv.detach())})
+                self.critic_optimizer.step()
+                _accumulate({"value_loss": float(value_loss.detach())})
         return {k: v / max(counts[k], 1) for k, v in stats.items()}
 
     def update(self) -> dict[str, float]:
-        cfg, buf = self.cfg, self.buf
-        T, B = cfg.num_steps, self.B
-        n = T * B
-        obs = buf.obs.reshape(n, self.obs_dim)
-        a_prop = buf.a_prop.reshape(n, self.da)
-        logp_old = buf.logp.reshape(n, self.N)
-        adv = self.adv.reshape(n)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        ret = self.ret.reshape(n)
-        vpred_old = buf.vpred.reshape(n)
+        cfg, storage = self.cfg, self.storage
+        num_steps, num_envs = cfg.num_steps, self.num_envs
+        num_samples = num_steps * num_envs
+        obs = storage.obs.reshape(num_samples, self.obs_dim)
+        proposals = storage.proposals.reshape(num_samples, self.act_dim)
+        old_log_probs = storage.log_probs.reshape(num_samples, self.num_agents)
+        advantages = self.advantages.reshape(num_samples)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        returns = self.returns.reshape(num_samples)
+        old_values = storage.value_preds.reshape(num_samples)
         params = [p for p in self.actor.parameters() if p.requires_grad]
         actor_frozen = self._critic_warmup_left > 0
 
-        if self.actor_rule == "happo":
-            out = self._update_happo(obs, a_prop, logp_old, adv, ret, vpred_old, actor_frozen)
+        if self.actor_update == "happo":
+            out = self._update_happo(obs, proposals, old_log_probs, advantages, returns, old_values, actor_frozen)
             return self._finish_update(out, actor_frozen)
 
-        mb = max(n // cfg.num_minibatches, 1)
+        batch_size = max(num_samples // cfg.num_minibatches, 1)
         stats: dict[str, float] = {}
         count = 0
 
-        def _acc(d: dict):
-            for k, v in d.items():
-                stats[k] = stats.get(k, 0.0) + float(v)
+        def _accumulate(values: dict):
+            for key, value in values.items():
+                stats[key] = stats.get(key, 0.0) + float(value)
 
         for _ in range(cfg.ppo_epochs):
-            perm = torch.randperm(n, device=self.device)
-            for s in range(0, n, mb):
-                idx = perm[s:s + mb]
+            perm = torch.randperm(num_samples, device=self.device)
+            for start in range(0, num_samples, batch_size):
+                idx = perm[start:start + batch_size]
                 if not actor_frozen:
-                    rows = buf.rows(idx)
-                    L_ind, L_team, tree_reg = self._surrogates(obs[idx], rows, a_prop[idx], logp_old[idx], adv[idx])
-                    field, ts = talo_update_field(L_ind, L_team, params, cfg.talo_sigma, cfg.talo_eps,
-                                                  enabled=self.use_talo)
-                    self.opt_a.zero_grad(set_to_none=True)
-                    for p, g in zip(params, field):
-                        p.grad = -g
-                    step_norm = torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm)
-                    self.opt_a.step()
-                    ts["step_norm"] = float(step_norm)
-                    ts["step_clipped"] = float(step_norm > cfg.max_grad_norm)
-                    _acc(ts)
-                    _acc({"L_ind": float(sum(L_ind).detach()), "L_team": float(L_team.detach()),
-                          "tree_reg": float(tree_reg)})
+                    rows = storage.rows(idx)
+                    agent_objectives, team_objective, tree_reg = self._objectives(
+                        obs[idx], rows, proposals[idx], old_log_probs[idx], advantages[idx]
+                    )
+                    field, talo_stats = talo_update_field(
+                        agent_objectives,
+                        team_objective,
+                        params,
+                        cfg.talo_sigma,
+                        cfg.talo_eps,
+                        enabled=self.use_talo,
+                    )
+                    self.actor_optimizer.zero_grad(set_to_none=True)
+                    for p, grad in zip(params, field):
+                        p.grad = -grad
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm)
+                    self.actor_optimizer.step()
+                    talo_stats["step_norm"] = float(grad_norm)
+                    talo_stats["step_clipped"] = float(grad_norm > cfg.max_grad_norm)
+                    _accumulate(talo_stats)
+                    _accumulate(
+                        {
+                            "L_ind": float(sum(agent_objectives).detach()),
+                            "L_team": float(team_objective.detach()),
+                            "tree_reg": float(tree_reg),
+                        }
+                    )
 
-                lv = self._value_loss(self.critic(obs[idx]), vpred_old[idx], ret[idx])
-                self.opt_c.zero_grad(set_to_none=True)
-                lv.backward()
+                value_loss = self._value_loss(self.critic(obs[idx]), old_values[idx], returns[idx])
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                value_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.max_grad_norm)
-                self.opt_c.step()
+                self.critic_optimizer.step()
 
-                _acc({"value_loss": float(lv.detach())})
+                _accumulate({"value_loss": float(value_loss.detach())})
                 count += 1
         out = {k: v / max(count, 1) for k, v in stats.items()}
         return self._finish_update(out, actor_frozen)
 
     def _finish_update(self, out: dict[str, float], actor_frozen: bool) -> dict[str, float]:
-        out.update({"tau": self.tau, "kappa": self.kappa, "hard_routing": float(self.hard),
-                    "log_std": float(torch.stack([a.log_std for a in self.actor.actors]).mean()),
+        out.update({"tau": self.tau, "kappa": self.kappa, "hard_routing": float(self.hard_routing),
+                    "log_std": float(torch.stack([actor.log_std for actor in self.actor.actors]).mean()),
                     "critic_warmup": float(actor_frozen)})
         if actor_frozen:
             self._critic_warmup_left -= 1
@@ -466,86 +525,112 @@ class SAGETrainer:
         return out
 
     def checkpoint(self) -> dict:
-        return {"actor": self.actor.state_dict(), "critic": self.critic.state_dict(),
-                "obs_norm": self.obs_norm.state_dict(), "opt_a": self.opt_a.state_dict(),
-                "opt_c": self.opt_c.state_dict(), "cfg": asdict(self.cfg),
-                "total_steps": self.total_steps, "tau": self.tau, "kappa": self.kappa,
-                "best_return": self.best_return, "hard_switched": self._hard_switched, "n_agents": self.N, "obs_dim_per": self.do, "act_dim_per": self.da_i,
-                "critic_kind": self.critic_kind, "critic_warmup_left": self._critic_warmup_left,
-                "value_norm": None if self.value_norm is None else self.value_norm.state_dict()}
+        return {
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "obs_norm": self.obs_norm.state_dict(),
+            "opt_a": self.actor_optimizer.state_dict(),
+            "opt_c": self.critic_optimizer.state_dict(),
+            "cfg": asdict(self.cfg),
+            "total_steps": self.total_steps,
+            "tau": self.tau,
+            "kappa": self.kappa,
+            "best_return": self.best_return,
+            "hard_switched": self._hard_switched,
+            "n_agents": self.num_agents,
+            "obs_dim_per": self.obs_dim_per,
+            "act_dim_per": self.act_dim_per,
+            "critic_kind": self.critic_kind,
+            "critic_warmup_left": self._critic_warmup_left,
+            "value_norm": None if self.value_norm is None else self.value_norm.state_dict(),
+        }
 
     def load(self, path, load_critic: bool = True, load_obs_norm: bool = True,
              restore_progress: bool = False) -> None:
-        ck = torch.load(str(path), map_location=self.device, weights_only=False)
-        for k, cur in (("n_agents", self.N), ("obs_dim_per", self.do), ("act_dim_per", self.da_i)):
-            if k in ck and int(ck[k]) != int(cur):
-                raise ValueError(f"checkpoint {k}={ck[k]} != env {k}={cur}")
-        self.actor.load_state_dict(ck["actor"])
-        ck_kind = ck.get("critic_kind") or (
-            "team" if any(k.startswith("encoder.") for k in ck.get("critic", {})) else "joint")
-        critic_loaded = load_critic and "critic" in ck and ck_kind == self.critic_kind
+        loaded_dict = torch.load(str(path), map_location=self.device, weights_only=False)
+        for key, current in (
+            ("n_agents", self.num_agents),
+            ("obs_dim_per", self.obs_dim_per),
+            ("act_dim_per", self.act_dim_per),
+        ):
+            if key in loaded_dict and int(loaded_dict[key]) != int(current):
+                raise ValueError(f"checkpoint {key}={loaded_dict[key]} != env {key}={current}")
+        self.actor.load_state_dict(loaded_dict["actor"])
+        saved_kind = loaded_dict.get("critic_kind") or (
+            "team" if any(key.startswith("encoder.") for key in loaded_dict.get("critic", {})) else "joint")
+        critic_loaded = load_critic and "critic" in loaded_dict and saved_kind == self.critic_kind
         if critic_loaded:
-            self.critic.load_state_dict(ck["critic"])
-            if self.value_norm is not None and ck.get("value_norm") is not None:
-                self.value_norm.load_state_dict(ck["value_norm"])
-        elif "critic" in ck:
-            print(f"[SAGE] checkpoint critic ({ck_kind}) not loaded; {self.critic_kind} critic "
+            self.critic.load_state_dict(loaded_dict["critic"])
+            if self.value_norm is not None and loaded_dict.get("value_norm") is not None:
+                self.value_norm.load_state_dict(loaded_dict["value_norm"])
+        elif "critic" in loaded_dict:
+            print(f"[SAGE] checkpoint critic ({saved_kind}) not loaded; {self.critic_kind} critic "
                   f"starts from scratch", flush=True)
-        if load_obs_norm and "obs_norm" in ck:
-            self.obs_norm.load_state_dict(ck["obs_norm"])
+        if load_obs_norm and "obs_norm" in loaded_dict:
+            self.obs_norm.load_state_dict(loaded_dict["obs_norm"])
         if restore_progress:
-            self._critic_warmup_left = int(ck.get("critic_warmup_left", 0))
+            self._critic_warmup_left = int(loaded_dict.get("critic_warmup_left", 0))
         elif not critic_loaded:
             self._critic_warmup_left = self.cfg.critic_warmup_iters
         if self._critic_warmup_left > 0:
             print(f"[SAGE] critic warm-up: actor frozen for {self._critic_warmup_left} iterations", flush=True)
         if restore_progress:
-            self.opt_a.load_state_dict(ck["opt_a"])
+            self.actor_optimizer.load_state_dict(loaded_dict["opt_a"])
             if critic_loaded:
-                self.opt_c.load_state_dict(ck["opt_c"])
-            self.total_steps = int(ck["total_steps"])
-            self.tau, self.kappa = float(ck["tau"]), float(ck["kappa"])
-            self.best_return = float(ck.get("best_return", float("-inf")))
-            if ck.get("hard_switched") and not self._hard_switched:
+                self.critic_optimizer.load_state_dict(loaded_dict["opt_c"])
+            self.total_steps = int(loaded_dict["total_steps"])
+            self.tau, self.kappa = float(loaded_dict["tau"]), float(loaded_dict["kappa"])
+            self.best_return = float(loaded_dict.get("best_return", float("-inf")))
+            if loaded_dict.get("hard_switched") and not self._hard_switched:
                 self._switch_to_hard(scale_lr=False)
 
     @torch.no_grad()
     def activate_inputs(self, dims: list[int]) -> None:
-        idx = torch.as_tensor(dims, dtype=torch.long, device=self.device)
-        for a in self.actor.actors:
-            t = a.tree
-            n_full = t.split_w.norm(dim=-1)
-            t.split_w[:, idx] = 0.0
-            n_rest = t.split_w.norm(dim=-1)
-            t.split_b.mul_(torch.where(n_rest > 1e-8, n_full / n_rest.clamp_min(1e-8), torch.ones_like(n_rest)))
-            t.leaf_K[:, :, idx] = 0.0
+        index = torch.as_tensor(dims, dtype=torch.long, device=self.device)
+        for actor in self.actor.actors:
+            tree = actor.tree
+            full_norm = tree.split_w.norm(dim=-1)
+            tree.split_w[:, index] = 0.0
+            rest_norm = tree.split_w.norm(dim=-1)
+            tree.split_b.mul_(
+                torch.where(
+                    rest_norm > 1e-8, full_norm / rest_norm.clamp_min(1e-8), torch.ones_like(rest_norm)
+                )
+            )
+            tree.leaf_K[:, :, index] = 0.0
         if isinstance(self.critic, TeamContextCritic):
-            self.critic.encoder[0].weight[:, idx] = 0.0
-            for i in range(self.N):
-                self.critic.value[0].weight[:, i * self.do + idx] = 0.0
-        self.obs_norm.reset_dims(torch.cat([i * self.do + idx for i in range(self.N)]))
+            self.critic.encoder[0].weight[:, index] = 0.0
+            for i in range(self.num_agents):
+                self.critic.value[0].weight[:, i * self.obs_dim_per + index] = 0.0
+        self.obs_norm.reset_dims(torch.cat([i * self.obs_dim_per + index for i in range(self.num_agents)]))
         print(f"[SAGE] activated {len(dims)} observation channels per carrier "
               f"(weights zeroed, normalisation re-estimated)", flush=True)
 
     def export_rules(self, feature_names=None) -> dict:
-        return {f"carrier_{i}": a.tree.export_rules(feature_names) for i, a in enumerate(self.actor.actors)}
+        return {f"carrier_{i}": actor.tree.export_rules(feature_names) for i, actor in enumerate(self.actor.actors)}
 
 
 @torch.no_grad()
 def deploy_action(actor: TeamActor, safety: FormationSafetyModel, obs_norm: RunningMeanStd,
-                  obs_raw: Tensor, state: SafetyState, human_slot: Optional[int] = None,
-                  a_human: Optional[Tensor] = None) -> tuple[Tensor, dict]:
-    obs = obs_norm.normalize(obs_raw)
-    a_nom, leaves = actor.nominal(obs)
+                  raw_obs: Tensor, state: SafetyState, human_slot: Optional[int] = None,
+                  human_action: Optional[Tensor] = None) -> tuple[Tensor, dict]:
+    obs = obs_norm.normalize(raw_obs)
+    nominal_actions, leaves = actor.nominal(obs)
     rows = safety.rows(state)
     fixed = None
     if human_slot is not None:
-        a_nom = a_nom.clone()
-        a_nom[:, 3 * human_slot:3 * human_slot + 3] = a_human
-        fixed = torch.zeros(a_nom.shape[1], dtype=torch.bool, device=a_nom.device)
+        nominal_actions = nominal_actions.clone()
+        nominal_actions[:, 3 * human_slot:3 * human_slot + 3] = human_action
+        fixed = torch.zeros(nominal_actions.shape[1], dtype=torch.bool, device=nominal_actions.device)
         fixed[3 * human_slot:3 * human_slot + 3] = True
-    a_exec, qp = safety.exact_projection(a_nom, rows, fixed=fixed)
-    return a_exec, {"a_nom": a_nom, "leaves": leaves, "rows": rows, "violated": rows.violated(a_nom), **qp}
+    actions, qp_info = safety.exact_projection(nominal_actions, rows, fixed=fixed)
+    return actions, {
+        "a_nom": nominal_actions,
+        "leaves": leaves,
+        "rows": rows,
+        "violated": rows.violated(nominal_actions),
+        **qp_info,
+    }
 
 
 def train(adapter, cfg: SAGEConfig, total_steps: int, log_dir: Path, device: torch.device,
@@ -570,46 +655,49 @@ def train(adapter, cfg: SAGEConfig, total_steps: int, log_dir: Path, device: tor
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(str(log_dir / "tensorboard"))
     best_path = log_dir / "best_model.pt"
-    per_iter = cfg.num_steps * adapter.num_envs
-    n_iter = (total_steps + per_iter - 1) // per_iter
-    it0 = trainer.total_steps // per_iter
+    steps_per_iter = cfg.num_steps * adapter.num_envs
+    num_iters = (total_steps + steps_per_iter - 1) // steps_per_iter
+    start_iter = trainer.total_steps // steps_per_iter
     print(f"[SAGE] variant={cfg.variant} cbf={trainer.use_cbf} sail={trainer.use_sail} talo={trainer.use_talo} "
-          f"N={trainer.N} obs/agent={trainer.do} envs={adapter.num_envs} steps/iter={per_iter} "
-          f"iters={n_iter} start_iter={it0}", flush=True)
+          f"N={trainer.num_agents} obs/agent={trainer.obs_dim_per} envs={adapter.num_envs} steps/iter={steps_per_iter} "
+          f"iters={num_iters} start_iter={start_iter}", flush=True)
 
-    for it in range(it0, n_iter):
-        t0 = time.time()
+    for iteration in range(start_iter, num_iters):
+        start_time = time.time()
         if stall_timeout_s and stall_timeout_s > 0:
             faulthandler.dump_traceback_later(stall_timeout_s, exit=True)
         trainer.set_progress(trainer.total_steps / max(total_steps, 1))
         if hasattr(adapter, "set_train_progress"):
             adapter.set_train_progress(trainer.total_steps / max(total_steps, 1))
-        m = trainer.collect()
-        u = trainer.update()
-        g = trainer.total_steps
-        for k, v in m.items():
-            if k.startswith("env/"):
-                writer.add_scalar(k, v, g)
-            elif k in ("episode_return", "num_episodes"):
-                if not (isinstance(v, float) and np.isnan(v)):
-                    writer.add_scalar("train/" + k, v, g)
+        collect_stats = trainer.collect()
+        update_stats = trainer.update()
+        step = trainer.total_steps
+        for key, value in collect_stats.items():
+            if key.startswith("env/"):
+                writer.add_scalar(key, value, step)
+            elif key in ("episode_return", "num_episodes"):
+                if not (isinstance(value, float) and np.isnan(value)):
+                    writer.add_scalar("train/" + key, value, step)
             else:
-                writer.add_scalar("safety/" + k, v, g)
-        for k, v in u.items():
-            writer.add_scalar("train/" + k, v, g)
-        ret = m["episode_return"]
-        if m["num_episodes"] > 0 and ret > trainer.best_return:
-            trainer.best_return = ret
+                writer.add_scalar("safety/" + key, value, step)
+        for key, value in update_stats.items():
+            writer.add_scalar("train/" + key, value, step)
+        episode_return = collect_stats["episode_return"]
+        if collect_stats["num_episodes"] > 0 and episode_return > trainer.best_return:
+            trainer.best_return = episode_return
             torch.save(trainer.checkpoint(), best_path)
         torch.save(trainer.checkpoint(), log_dir / "models" / "latest.pt")
-        if (it + 1) % checkpoint_interval == 0:
-            torch.save(trainer.checkpoint(), log_dir / "models" / f"iter_{it + 1}.pt")
-        if print_every and (it + 1) % print_every == 0:
-            print(f"[{cfg.variant}] it {it + 1}/{n_iter} steps={g} ret={ret:.2f}(n={int(m['num_episodes'])}) "
-                  f"pviol={m.get('pviol_proposal', float('nan')):.3f} corr={m.get('correction', float('nan')):.3f} "
-                  f"infeas={m.get('qp_infeasible', float('nan')):.3f} Wgap={u.get('W_gap', float('nan')):.3g} "
-                  f"cos={u.get('cos_align', float('nan')):.3f} tau={u['tau']:.2f}{'(hard)' if trainer.hard else ''} kappa={u['kappa']:.1f} "
-                  f"{time.time() - t0:.1f}s", flush=True)
+        if (iteration + 1) % checkpoint_interval == 0:
+            torch.save(trainer.checkpoint(), log_dir / "models" / f"iter_{iteration + 1}.pt")
+        if print_every and (iteration + 1) % print_every == 0:
+            print(
+                f"[{cfg.variant}] it {iteration + 1}/{num_iters} steps={step} ret={episode_return:.2f}(n={int(collect_stats['num_episodes'])}) "
+                f"pviol={collect_stats.get('pviol_proposal', float('nan')):.3f} corr={collect_stats.get('correction', float('nan')):.3f} "
+                f"infeas={collect_stats.get('qp_infeasible', float('nan')):.3f} Wgap={update_stats.get('W_gap', float('nan')):.3g} "
+                f"cos={update_stats.get('cos_align', float('nan')):.3f} tau={update_stats['tau']:.2f}{'(hard)' if trainer.hard_routing else ''} kappa={update_stats['kappa']:.1f} "
+                f"{time.time() - start_time:.1f}s",
+                flush=True,
+            )
     faulthandler.cancel_dump_traceback_later()
     writer.close()
     (log_dir / "DONE").write_text(f"{trainer.total_steps}\n")

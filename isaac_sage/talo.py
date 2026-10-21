@@ -7,40 +7,42 @@ from torch import Tensor
 
 
 def _grads(objective: Tensor, params: Sequence[Tensor], create_graph: bool) -> list[Tensor]:
-    gs = torch.autograd.grad(objective, params, create_graph=create_graph, allow_unused=True)
-    return [torch.zeros_like(p) if g is None else g for g, p in zip(gs, params)]
+    grads = torch.autograd.grad(objective, params, create_graph=create_graph, allow_unused=True)
+    return [torch.zeros_like(p) if g is None else g for g, p in zip(grads, params)]
 
 
 def _dot(a: Sequence[Tensor], b: Sequence[Tensor]) -> Tensor:
     return sum((x * y).sum() for x, y in zip(a, b))
 
 
-def talo_update_field(L_ind: Sequence[Tensor], L_team: Tensor, params: Sequence[Tensor],
+def talo_update_field(agent_objectives: Sequence[Tensor], team_objective: Tensor, params: Sequence[Tensor],
                       sigma: float, eps: float, enabled: bool = True) -> tuple[list[Tensor], dict]:
     need_graph = bool(enabled)
-    g_ind = _grads(sum(L_ind), params, create_graph=need_graph)
-    g_team = _grads(L_team, params, create_graph=need_graph)
-    W = 0.5 * sum(((gi - gt) ** 2).sum() for gi, gt in zip(g_ind, g_team))
+    agent_grads = _grads(sum(agent_objectives), params, create_graph=need_graph)
+    team_grads = _grads(team_objective, params, create_graph=need_graph)
+    gap = 0.5 * sum(((agent_g - team_g) ** 2).sum() for agent_g, team_g in zip(agent_grads, team_grads))
 
     with torch.no_grad():
-        ni = torch.sqrt(sum((gi.detach() ** 2).sum() for gi in g_ind))
-        nt = torch.sqrt(sum((gt.detach() ** 2).sum() for gt in g_team))
-        cos = _dot([g.detach() for g in g_ind], [g.detach() for g in g_team]) / (ni * nt + 1e-12)
+        agent_norm = torch.sqrt(sum((agent_g.detach() ** 2).sum() for agent_g in agent_grads))
+        team_norm = torch.sqrt(sum((team_g.detach() ** 2).sum() for team_g in team_grads))
+        cos = _dot([g.detach() for g in agent_grads], [g.detach() for g in team_grads]) / (
+            agent_norm * team_norm + 1e-12
+        )
 
-    stats = {"W_gap": float(W.detach()), "cos_align": float(cos),
-             "g_ind_norm": float(ni), "g_team_norm": float(nt),
+    stats = {"W_gap": float(gap.detach()), "cos_align": float(cos),
+             "g_ind_norm": float(agent_norm), "g_team_norm": float(team_norm),
              "talo_lambda": 0.0, "talo_active": 0.0, "delta_gap": 0.0}
 
     if not enabled:
-        return [g.detach() for g in g_team], stats
-    if float(W.detach()) <= 0.0:
-        return [g.detach() for g in g_ind], stats
+        return [g.detach() for g in team_grads], stats
+    if float(gap.detach()) <= 0.0:
+        return [g.detach() for g in agent_grads], stats
 
-    gradW = _grads(W, params, create_graph=False)
+    gap_grads = _grads(gap, params, create_graph=False)
     with torch.no_grad():
-        delta = _dot(gradW, [g.detach() for g in g_ind]) + sigma * W.detach()
-        hn2 = sum((h * h).sum() for h in gradW)
-        lam = torch.clamp(delta, min=0.0) / (hn2 + eps)
-        field = [gi.detach() - lam * h for gi, h in zip(g_ind, gradW)]
+        delta = _dot(gap_grads, [g.detach() for g in agent_grads]) + sigma * gap.detach()
+        gap_grad_sq = sum((gap_g * gap_g).sum() for gap_g in gap_grads)
+        lam = torch.clamp(delta, min=0.0) / (gap_grad_sq + eps)
+        field = [agent_g.detach() - lam * gap_g for agent_g, gap_g in zip(agent_grads, gap_grads)]
     stats.update({"talo_lambda": float(lam), "talo_active": float(delta > 0), "delta_gap": float(delta)})
     return field, stats

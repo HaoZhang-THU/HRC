@@ -21,15 +21,15 @@ def use_isaaclab_core(core_root: str | Path) -> None:
     if not (core_root / "source" / "isaaclab" / "isaaclab").is_dir():
         raise FileNotFoundError(f"no Isaac Lab checkout at {core_root}")
     os.environ["ISAACLAB_PATH"] = str(core_root)
-    sys.meta_path[:] = [f for f in sys.meta_path
-                        if not getattr(type(f), "__module__", "").startswith("__editable___isaaclab")]
+    sys.meta_path[:] = [finder for finder in sys.meta_path
+                        if not getattr(type(finder), "__module__", "").startswith("__editable___isaaclab")]
     for pkg in reversed(ISAACLAB_CORE_PACKAGES):
-        p = core_root / "source" / pkg
-        if p.is_dir():
-            sp = str(p)
-            if sp in sys.path:
-                sys.path.remove(sp)
-            sys.path.insert(0, sp)
+        path = core_root / "source" / pkg
+        if path.is_dir():
+            path_str = str(path)
+            if path_str in sys.path:
+                sys.path.remove(path_str)
+            sys.path.insert(0, path_str)
 
 
 def setup_isaaclab_path() -> Path | None:
@@ -59,9 +59,9 @@ def ungate_progress(env) -> None:
 
     def _get_rewards():
         board_xy = env._board.data.root_pos_w[:, :2]
-        cur = torch.norm(env._waypoints[:, 0] - board_xy, dim=-1)
-        progress = torch.clamp((env._prev_dist_to_wp - cur) / v_ref, -1.0, 1.0)
-        rew = orig()
+        dist = torch.norm(env._waypoints[:, 0] - board_xy, dim=-1)
+        progress = torch.clamp((env._prev_dist_to_wp - dist) / v_ref, -1.0, 1.0)
+        rewards = orig()
         seg = env._waypoints[:, 1] - env._waypoints[:, 0]
         seg_ok = torch.norm(seg, dim=-1, keepdim=True) > 1e-3
         dir_vec = torch.where(seg_ok, seg, env._waypoints[:, 0] - board_xy)
@@ -73,33 +73,35 @@ def ungate_progress(env) -> None:
             log["rew_progress_refund"] = refund.mean()
             log["rew_progress"] = log["rew_progress"] + refund.mean()
             log["reward_total"] = log["reward_total"] + refund.mean()
-        return {a: r + refund for a, r in rew.items()}
+        return {agent: reward + refund for agent, reward in rewards.items()}
 
     env._get_rewards = _get_rewards
 
 
 def _env_paths(env) -> Tensor:
-    p = getattr(env, "_sage_env_path", None)
-    return p if p is not None else env._path.unsqueeze(0).expand(env.num_envs, -1, -1)
+    path = getattr(env, "_sage_env_path", None)
+    return path if path is not None else env._path.unsqueeze(0).expand(env.num_envs, -1, -1)
 
 
-def _project(paths: Tensor, pts: Tensor) -> tuple[Tensor, Tensor]:
-    a, ab = paths[:, :-1], paths[:, 1:] - paths[:, :-1]
-    seg2 = (ab * ab).sum(-1).clamp_min(1e-12)
-    t = (((pts.unsqueeze(1) - a) * ab).sum(-1) / seg2).clamp(0.0, 1.0)
-    d2 = ((a + t.unsqueeze(-1) * ab - pts.unsqueeze(1)) ** 2).sum(-1)
-    k = d2.argmin(1, keepdim=True)
-    seg = seg2.sqrt()
-    s_cum = torch.cat((torch.zeros_like(seg[:, :1]), seg.cumsum(1)), 1)
-    s = s_cum.gather(1, k).squeeze(1) + t.gather(1, k).squeeze(1) * seg.gather(1, k).squeeze(1)
-    return s, s_cum
+def _project(paths: Tensor, points: Tensor) -> tuple[Tensor, Tensor]:
+    seg_start, seg = paths[:, :-1], paths[:, 1:] - paths[:, :-1]
+    seg_len_sq = (seg * seg).sum(-1).clamp_min(1e-12)
+    ratio = (((points.unsqueeze(1) - seg_start) * seg).sum(-1) / seg_len_sq).clamp(0.0, 1.0)
+    dist_sq = ((seg_start + ratio.unsqueeze(-1) * seg - points.unsqueeze(1)) ** 2).sum(-1)
+    nearest = dist_sq.argmin(1, keepdim=True)
+    seg_len = seg_len_sq.sqrt()
+    cum_length = torch.cat((torch.zeros_like(seg_len[:, :1]), seg_len.cumsum(1)), 1)
+    arc = cum_length.gather(1, nearest).squeeze(1) + ratio.gather(1, nearest).squeeze(1) * seg_len.gather(
+        1, nearest
+    ).squeeze(1)
+    return arc, cum_length
 
 
 def episode_flags(env) -> tuple[Tensor, Tensor]:
     loose = getattr(env, "_sage_loose", None)
     loose = env._goal_reached if loose is None else loose
-    succ = getattr(env, "_sage_success", None)
-    return (loose if succ is None else succ), loose
+    success = getattr(env, "_sage_success", None)
+    return (loose if success is None else success), loose
 
 
 LOOSE_GOAL_RADIUS = 0.15
@@ -111,56 +113,60 @@ def projected_progress(env, loose_goal: bool = True) -> None:
     if not env.cfg.use_normalized_reward or not env.cfg.use_fixed_path:
         raise ValueError("projected_progress needs the normalised reward and a fixed path")
     task_mod.WP_REACH_THRESHOLD = -1.0
-    n, dev = env.num_envs, env.device
-    n_pts = int(env._path.shape[0])
+    num_envs, device = env.num_envs, env.device
+    num_points = int(env._path.shape[0])
     hl_dt = env.cfg.sim.dt * env.cfg.decimation
     v_ref = max(env.cfg.nrew_progress_speed * hl_dt, 1e-6)
-    env._sage_s = torch.zeros(n, device=dev)
-    env._sage_loose = torch.zeros(n, dtype=torch.bool, device=dev)
+    env._sage_s = torch.zeros(num_envs, device=device)
+    env._sage_loose = torch.zeros(num_envs, dtype=torch.bool, device=device)
     orig_rewards, orig_reset = env._get_rewards, env._reset_idx
 
-    def _sync(ids, s, s_cum):
-        k = torch.searchsorted(s_cum.contiguous(), (s + 1e-3).unsqueeze(1)).squeeze(1).clamp(1, n_pts - 1)
-        env._path_idx[ids] = k
-        env._wp_reached_count[ids] = k - 1
+    def _sync(ids, arc, cum_length):
+        index = (
+            torch.searchsorted(cum_length.contiguous(), (arc + 1e-3).unsqueeze(1))
+            .squeeze(1)
+            .clamp(1, num_points - 1)
+        )
+        env._path_idx[ids] = index
+        env._wp_reached_count[ids] = index - 1
         env._refresh_path_window(ids)
-        board_w = env._board.data.root_pos_w[ids, :2]
-        env._prev_dist_to_wp[ids] = torch.norm(env._waypoints[ids, 0] - board_w, dim=-1)
+        board_world = env._board.data.root_pos_w[ids, :2]
+        env._prev_dist_to_wp[ids] = torch.norm(env._waypoints[ids, 0] - board_world, dim=-1)
 
     def _get_rewards():
-        ids = torch.arange(n, device=dev)
+        ids = torch.arange(num_envs, device=device)
         local = env._board.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
         paths = _env_paths(env)
-        s, s_cum = _project(paths, local)
-        progress = ((s - env._sage_s) / v_ref).clamp(-1.0, 1.0)
-        env._sage_s = s
-        _sync(ids, s, s_cum)
-        rew = orig_rewards()
-        env._sage_stream = dict(rew)
+        arc, cum_length = _project(paths, local)
+        progress = ((arc - env._sage_s) / v_ref).clamp(-1.0, 1.0)
+        env._sage_s = arc
+        _sync(ids, arc, cum_length)
+        rewards = orig_rewards()
+        env._sage_stream = dict(rewards)
         at_goal = torch.norm(paths[:, -1] - local, dim=-1) < LOOSE_GOAL_RADIUS
         env._sage_loose |= at_goal
-        r = env.cfg.nrew_w_progress * progress
+        extra = env.cfg.nrew_w_progress * progress
         log = env.extras.get("log")
         if loose_goal:
             newly = at_goal & ~env._goal_reached
             env._goal_reached |= at_goal
             bonus = newly.float() * env.cfg.nrew_w_goal
-            r = r + bonus
+            extra = extra + bonus
             if log is not None:
                 log["reward_goal"] = bonus.mean()
         if log is not None:
             log["rew_progress"] = log["rew_progress"] + (env.cfg.nrew_w_progress * progress).mean()
-            log["reward_total"] = log["reward_total"] + r.mean()
-        return {a: v + r for a, v in rew.items()}
+            log["reward_total"] = log["reward_total"] + extra.mean()
+        return {agent: value + extra for agent, value in rewards.items()}
 
     def _reset_idx(env_ids):
         orig_reset(env_ids)
-        ids = env_ids if torch.is_tensor(env_ids) else torch.as_tensor(list(env_ids), dtype=torch.long, device=dev)
+        ids = env_ids if torch.is_tensor(env_ids) else torch.as_tensor(list(env_ids), dtype=torch.long, device=device)
         local = env._board.data.root_pos_w[ids, :2] - env.scene.env_origins[ids, :2]
-        s, s_cum = _project(_env_paths(env)[ids], local)
-        env._sage_s[ids] = s
+        arc, cum_length = _project(_env_paths(env)[ids], local)
+        env._sage_s[ids] = arc
         env._sage_loose[ids] = False
-        _sync(ids, s, s_cum)
+        _sync(ids, arc, cum_length)
 
     env._get_rewards = _get_rewards
     env._reset_idx = _reset_idx
@@ -173,38 +179,38 @@ def tight_success(env, goal_yaw: float, yaw_symmetry: float, pos_tol: float = 0.
 
     if env.cfg.terminate_on_goal:
         raise ValueError("tight_success needs cfg.terminate_on_goal = False (set before gym.make)")
-    n, dev = env.num_envs, env.device
-    env._sage_success = torch.zeros(n, dtype=torch.bool, device=dev)
-    streak = torch.zeros(n, dtype=torch.long, device=dev)
-    now = torch.zeros(n, dtype=torch.bool, device=dev)
+    num_envs, device = env.num_envs, env.device
+    env._sage_success = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    streak = torch.zeros(num_envs, dtype=torch.long, device=device)
+    now = torch.zeros(num_envs, dtype=torch.bool, device=device)
     orig_dones, orig_rewards, orig_reset = env._get_dones, env._get_rewards, env._reset_idx
 
     def _goal_error():
         local = env._board.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
-        d = torch.norm(local - _env_paths(env)[:, -1], dim=-1)
-        e = torch.remainder(_get_heading_yaw(env._board.data.root_quat_w) - goal_yaw, yaw_symmetry)
-        e = torch.where(e > yaw_symmetry / 2, e - yaw_symmetry, e)
-        return d, e
+        dist = torch.norm(local - _env_paths(env)[:, -1], dim=-1)
+        yaw_error = torch.remainder(_get_heading_yaw(env._board.data.root_quat_w) - goal_yaw, yaw_symmetry)
+        yaw_error = torch.where(yaw_error > yaw_symmetry / 2, yaw_error - yaw_symmetry, yaw_error)
+        return dist, yaw_error
 
     def _get_dones():
         term, trunc = orig_dones()
-        d, e = _goal_error()
-        v = torch.norm(env._board.data.root_lin_vel_w[:, :2], dim=-1)
-        w = env._board.data.root_ang_vel_w[:, 2].abs()
-        ok = (d < pos_tol) & (e.abs() < yaw_tol) & (v < speed_tol) & (w < yaw_rate_tol)
-        streak.copy_(torch.where(ok, streak + 1, torch.zeros_like(streak)))
+        dist, yaw_error = _goal_error()
+        speed = torch.norm(env._board.data.root_lin_vel_w[:, :2], dim=-1)
+        yaw_rate = env._board.data.root_ang_vel_w[:, 2].abs()
+        reached = (dist < pos_tol) & (yaw_error.abs() < yaw_tol) & (speed < speed_tol) & (yaw_rate < yaw_rate_tol)
+        streak.copy_(torch.where(reached, streak + 1, torch.zeros_like(streak)))
         failed = next(iter(term.values())).bool()
         now.copy_((streak >= hold_steps) & ~failed & ~env._sage_success)
         env._sage_success |= now
         env._sage_success_now = now
-        return {a: t | now for a, t in term.items()}, trunc
+        return {agent: flag | now for agent, flag in term.items()}, trunc
 
     def _get_rewards():
         latched = env._goal_reached.clone()
-        rew = orig_rewards()
+        rewards = orig_rewards()
         task_goal = (env._goal_reached & ~latched).float() * env.cfg.nrew_w_goal
-        d, e = _goal_error()
-        shaping = shaping_weight * (1.0 - e.abs() / (yaw_symmetry / 2)) * (d < shaping_radius).float()
+        dist, yaw_error = _goal_error()
+        shaping = shaping_weight * (1.0 - yaw_error.abs() / (yaw_symmetry / 2)) * (dist < shaping_radius).float()
         bonus = now.float() * env.cfg.nrew_w_goal
         delta = bonus - task_goal + shaping
         log = env.extras.get("log")
@@ -212,7 +218,7 @@ def tight_success(env, goal_yaw: float, yaw_symmetry: float, pos_tol: float = 0.
             log["reward_goal"] = bonus.mean()
             log["rew_goal_yaw"] = shaping.mean()
             log["reward_total"] = log["reward_total"] + delta.mean()
-        return {a: r + delta for a, r in rew.items()}
+        return {agent: reward + delta for agent, reward in rewards.items()}
 
     def _reset_idx(env_ids):
         orig_reset(env_ids)
@@ -231,22 +237,22 @@ def success_compensation(env, gamma: float = 0.99) -> None:
 
     def _get_rewards():
         before = env._goal_reached.clone()
-        rew = orig()
+        rewards = orig()
         now = getattr(env, "_sage_success_now", None)
         event = (env._goal_reached & ~before) if now is None else now
         remaining = (env.max_episode_length - env.episode_length_buf).clamp(min=0).float()
         scale = (1.0 - gamma ** remaining) / (1.0 - gamma)
         stream = getattr(env, "_sage_stream", None)
-        out, comp_mean = {}, None
-        for a, r in rew.items():
-            base = stream[a] if stream is not None else r - w_goal * event.float()
-            comp = event.float() * base.clamp(min=0.0) * scale
-            out[a] = r + comp
-            comp_mean = comp.mean()
+        out, compensation_mean = {}, None
+        for agent, reward in rewards.items():
+            base = stream[agent] if stream is not None else reward - w_goal * event.float()
+            compensation = event.float() * base.clamp(min=0.0) * scale
+            out[agent] = reward + compensation
+            compensation_mean = compensation.mean()
         log = env.extras.get("log")
-        if log is not None and comp_mean is not None:
-            log["rew_success_comp"] = comp_mean
-            log["reward_total"] = log["reward_total"] + comp_mean
+        if log is not None and compensation_mean is not None:
+            log["rew_success_comp"] = compensation_mean
+            log["reward_total"] = log["reward_total"] + compensation_mean
         return out
 
     env._get_rewards = _get_rewards
@@ -272,7 +278,9 @@ def apply_task_options(env, opts: dict, scene: dict | None) -> list[str]:
         if scene is None or "goal_yaw" not in scene:
             raise ValueError("success_mode tight needs a scene with goal_yaw")
         tight_success(env, float(scene["goal_yaw"]), float(scene.get("yaw_symmetry", 2 * math.pi)))
-        done.append(f"tight success (goal yaw {scene['goal_yaw']}, symmetry {scene.get('yaw_symmetry', 2 * math.pi):.3f})")
+        done.append(
+            f"tight success (goal yaw {scene['goal_yaw']}, symmetry {scene.get('yaw_symmetry', 2 * math.pi):.3f})"
+        )
     if opts.get("success_compensation"):
         success_compensation(env)
         done.append("success compensation (goal bonus + discounted reward for the remaining budget)")
@@ -284,83 +292,83 @@ def randomize_spawn(env, pool: list[dict], curriculum: dict | None = None) -> No
     from .task.cooperative_transport_env import (
         ALL_ROBOT_IDS, NUM_WAYPOINTS, _get_heading_yaw)
 
-    dev = env.device
-    poses = torch.tensor([e["pose"] for e in pool], dtype=torch.float32, device=dev)
-    paths = torch.tensor([e["path"] for e in pool], dtype=torch.float32, device=dev)
-    n_pts = int(env._path.shape[0])
-    if paths.shape[1] != n_pts:
-        raise ValueError(f"spawn_pool paths have {paths.shape[1]} points, the task path {n_pts}")
+    device = env.device
+    poses = torch.tensor([entry["pose"] for entry in pool], dtype=torch.float32, device=device)
+    paths = torch.tensor([entry["path"] for entry in pool], dtype=torch.float32, device=device)
+    num_points = int(env._path.shape[0])
+    if paths.shape[1] != num_points:
+        raise ValueError(f"spawn_pool paths have {paths.shape[1]} points, the task path {num_points}")
     env_path = paths[0].expand(env.num_envs, -1, -1).clone()
     env._sage_env_path = env_path
-    centre = torch.tensor(env.cfg.start_xy, dtype=torch.float32, device=dev)
+    centre = torch.tensor(env.cfg.start_xy, dtype=torch.float32, device=device)
     orig_reset = env._reset_idx
     if curriculum is not None:
         if "curriculum_ok" not in pool[0]:
             raise ValueError("spawn_pool has no curriculum_yaw / curriculum_ok; regenerate the scene")
-        cur_yaw = torch.tensor([e["curriculum_yaw"] for e in pool], dtype=torch.float32, device=dev)
-        cur_ok = torch.tensor([e["curriculum_ok"] for e in pool], dtype=torch.bool, device=dev)
+        curriculum_yaw = torch.tensor([entry["curriculum_yaw"] for entry in pool], dtype=torch.float32, device=device)
+        curriculum_ok = torch.tensor([entry["curriculum_ok"] for entry in pool], dtype=torch.bool, device=device)
     env._sage_train_progress = 0.0
-    from_curriculum = torch.zeros(env.num_envs, dtype=torch.bool, device=dev)
+    from_curriculum = torch.zeros(env.num_envs, dtype=torch.bool, device=device)
 
     def _refresh_path_window(env_ids):
         origins = env.scene.env_origins[env_ids, :2]
         base = env._path_idx[env_ids]
         for k in range(NUM_WAYPOINTS):
-            idx = torch.clamp(base + k, max=n_pts - 1)
+            idx = torch.clamp(base + k, max=num_points - 1)
             env._waypoints[env_ids, k] = env_path[env_ids, idx] + origins
 
     def _place(obj, env_ids, xy, yaw):
-        st = obj.data.default_root_state[env_ids].clone()
-        c, s = torch.cos(yaw), torch.sin(yaw)
-        rel = st[:, :2] - centre
-        st[:, 0] = xy[:, 0] + c * rel[:, 0] - s * rel[:, 1]
-        st[:, 1] = xy[:, 1] + s * rel[:, 0] + c * rel[:, 1]
-        st[:, :3] += env.scene.env_origins[env_ids]
+        state = obj.data.default_root_state[env_ids].clone()
+        cos, sin = torch.cos(yaw), torch.sin(yaw)
+        rel = state[:, :2] - centre
+        state[:, 0] = xy[:, 0] + cos * rel[:, 0] - sin * rel[:, 1]
+        state[:, 1] = xy[:, 1] + sin * rel[:, 0] + cos * rel[:, 1]
+        state[:, :3] += env.scene.env_origins[env_ids]
         q_yaw = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw),
                              torch.sin(yaw / 2)], dim=-1)
-        st[:, 3:7] = quat_mul(q_yaw, st[:, 3:7])
-        st[:, 7:] = 0.0
-        obj.write_root_pose_to_sim(st[:, :7], env_ids)
-        obj.write_root_velocity_to_sim(st[:, 7:], env_ids)
-        return st[:, :2]
+        state[:, 3:7] = quat_mul(q_yaw, state[:, 3:7])
+        state[:, 7:] = 0.0
+        obj.write_root_pose_to_sim(state[:, :7], env_ids)
+        obj.write_root_velocity_to_sim(state[:, 7:], env_ids)
+        return state[:, :2]
 
     def _reset_idx(env_ids):
         if not torch.is_tensor(env_ids):
-            env_ids = torch.as_tensor(list(env_ids), dtype=torch.long, device=dev)
+            env_ids = torch.as_tensor(list(env_ids), dtype=torch.long, device=device)
         ended = env.episode_length_buf[env_ids] > 0
-        succ, loose = episode_flags(env)
-        succ, loose = succ[env_ids] & ended, loose[env_ids] & ended
-        cur = from_curriculum[env_ids]
+        success, loose = episode_flags(env)
+        success, loose = success[env_ids] & ended, loose[env_ids] & ended
+        is_curriculum = from_curriculum[env_ids]
         log = env.extras.setdefault("log", {})
-        for tag, sel in (("true_start", ~cur), ("curriculum", cur)):
-            for key, flag in (("episodes", ended), ("success", succ), ("loose_success", loose)):
+        for tag, sel in (("true_start", ~is_curriculum), ("curriculum", is_curriculum)):
+            for key, flag in (("episodes", ended), ("success", success), ("loose_success", loose)):
                 log[f"{key}_{tag}"] = log.get(f"{key}_{tag}", 0.0) + float((flag & sel).sum())
-        draw = torch.randint(len(pool), (len(env_ids),), device=dev)
+        draw = torch.randint(len(pool), (len(env_ids),), device=device)
         env_path[env_ids] = paths[draw]
         orig_reset(env_ids)
         xy, yaw = poses[draw, :2], poses[draw, 2]
         if curriculum is not None:
             frac = min(1.0, env._sage_train_progress / max(curriculum["anneal_fraction"], 1e-6))
             low = curriculum["initial_low"] + frac * (curriculum["final_low"] - curriculum["initial_low"])
-            s = low + torch.rand(len(env_ids), device=dev) * (0.95 - low)
-            idx = (s * (n_pts - 1)).long().clamp(0, n_pts - 2)
-            use = (torch.rand(len(env_ids), device=dev) < curriculum["prob"]) & cur_ok[draw, idx]
+            start_frac = low + torch.rand(len(env_ids), device=device) * (0.95 - low)
+            idx = (start_frac * (num_points - 1)).long().clamp(0, num_points - 2)
+            use = (torch.rand(len(env_ids), device=device) < curriculum["prob"]) & curriculum_ok[draw, idx]
             from_curriculum[env_ids] = use
             if use.any():
                 xy = torch.where(use.unsqueeze(-1), paths[draw, idx], xy)
-                yaw = torch.where(use, cur_yaw[draw, idx], yaw)
+                yaw = torch.where(use, curriculum_yaw[draw, idx], yaw)
                 env._path_idx[env_ids] = torch.where(use, idx + 1, env._path_idx[env_ids])
                 env._wp_reached_count[env_ids] = torch.where(use, idx, env._wp_reached_count[env_ids])
                 env._refresh_path_window(env_ids)
-        for aid in ALL_ROBOT_IDS:
-            w = _place(env.robots[aid], env_ids, xy, yaw)
-            ryaw = _get_heading_yaw(env.robots[aid].data.default_root_state[env_ids, 3:7]) + yaw
-            for buf in (env._target_pos_world, env._target_start_pos, env._target_final_pos):
-                buf[aid][env_ids] = w
-            for buf in (env._target_yaw_world, env._target_start_yaw, env._target_final_yaw):
-                buf[aid][env_ids] = ryaw
-        board_w = _place(env._board, env_ids, xy, yaw)
-        env._prev_dist_to_wp[env_ids] = torch.norm(env._waypoints[env_ids, 0] - board_w, dim=-1)
+        for agent_id in ALL_ROBOT_IDS:
+            world_xy = _place(env.robots[agent_id], env_ids, xy, yaw)
+            robot_yaw = _get_heading_yaw(env.robots[agent_id].data.default_root_state[env_ids, 3:7]) + yaw
+            for target_buf in (env._target_pos_world, env._target_start_pos, env._target_final_pos):
+                target_buf[agent_id][env_ids] = world_xy
+            for target_buf in (env._target_yaw_world, env._target_start_yaw, env._target_final_yaw):
+                target_buf[agent_id][env_ids] = robot_yaw
+        board_world = _place(env._board, env_ids, xy, yaw)
+        env._prev_dist_to_wp[env_ids] = torch.norm(env._waypoints[env_ids, 0] - board_world, dim=-1)
 
     env._refresh_path_window = _refresh_path_window
     env._reset_idx = _reset_idx
@@ -373,43 +381,43 @@ class IsaacCoopTransportAdapter:
             ALL_ROBOT_IDS, BOARD_LENGTH, BOARD_WIDTH, _get_heading_yaw)
 
         self.env = env_unwrapped
-        self._yaw = _get_heading_yaw
+        self._heading_yaw = _get_heading_yaw
         cfg = env_unwrapped.cfg
         self.agent_ids = list(cfg.possible_agents)
         self.all_ids = list(ALL_ROBOT_IDS)
-        self.n_agents = len(self.agent_ids)
+        self.num_agents = len(self.agent_ids)
         self.act_dim_per = 3
         self.obs_dim_per = int(cfg.observation_spaces[self.agent_ids[0]])
         self.num_envs = int(env_unwrapped.num_envs)
         self.device = torch.device(env_unwrapped.device)
         self.action_scale = torch.tensor(
             [cfg.max_target_dist, cfg.max_target_dist, cfg.max_target_yaw], device=self.device)
-        off = cfg.robot_offset
-        anchors = {"robot_0": (BOARD_LENGTH / 2 + off, 0.0),
-                   "robot_1": (-(BOARD_LENGTH / 2 + off), 0.0),
-                   "robot_2": (0.0, BOARD_WIDTH / 2 + off)}
-        self.anchors_local = torch.tensor([anchors[a] for a in self.all_ids], device=self.device)
-        self.controlled = torch.tensor([self.all_ids.index(a) for a in self.agent_ids],
+        offset = cfg.robot_offset
+        anchors = {"robot_0": (BOARD_LENGTH / 2 + offset, 0.0),
+                   "robot_1": (-(BOARD_LENGTH / 2 + offset), 0.0),
+                   "robot_2": (0.0, BOARD_WIDTH / 2 + offset)}
+        self.anchors_local = torch.tensor([anchors[agent] for agent in self.all_ids], device=self.device)
+        self.controlled = torch.tensor([self.all_ids.index(agent) for agent in self.agent_ids],
                                        dtype=torch.long, device=self.device)
         self.aabbs = env_unwrapped._obs_aabb.to(self.device)
         self.board_dims = (BOARD_LENGTH, BOARD_WIDTH)
         self._partner = None
 
     def _stack(self, obs_dict: dict) -> Tensor:
-        return torch.cat([obs_dict[a].to(self.device) for a in self.agent_ids], dim=-1)
+        return torch.cat([obs_dict[agent].to(self.device) for agent in self.agent_ids], dim=-1)
 
     def set_partner_perturbation(self, slot: int = 1, lin: float = 0.01, yaw_deg: float = 1.5,
                                  gain_lin: float = 1.0, gain_yaw: float = 1.0) -> None:
         self._partner = {"slot": int(slot), "lin": float(lin), "yaw": math.radians(yaw_deg),
                          "gain_lin": float(gain_lin), "gain_yaw": float(gain_yaw)}
 
-    def _perturb(self, cmd: Tensor) -> Tensor:
-        p = self._partner
-        xy = cmd[:, :2] * p["gain_lin"] + (torch.rand_like(cmd[:, :2]) * 2.0 - 1.0) * p["lin"]
-        th = torch.randn(cmd.shape[0], device=cmd.device) * p["yaw"]
-        c, s = torch.cos(th), torch.sin(th)
-        xy = torch.stack((c * xy[:, 0] - s * xy[:, 1], s * xy[:, 0] + c * xy[:, 1]), -1)
-        return torch.cat((xy, cmd[:, 2:] * p["gain_yaw"]), -1)
+    def _perturb(self, command: Tensor) -> Tensor:
+        params = self._partner
+        xy = command[:, :2] * params["gain_lin"] + (torch.rand_like(command[:, :2]) * 2.0 - 1.0) * params["lin"]
+        angle = torch.randn(command.shape[0], device=command.device) * params["yaw"]
+        cos, sin = torch.cos(angle), torch.sin(angle)
+        xy = torch.stack((cos * xy[:, 0] - sin * xy[:, 1], sin * xy[:, 0] + cos * xy[:, 1]), -1)
+        return torch.cat((xy, command[:, 2:] * params["gain_yaw"]), -1)
 
     def set_train_progress(self, frac: float) -> None:
         self.env._sage_train_progress = float(frac)
@@ -419,37 +427,37 @@ class IsaacCoopTransportAdapter:
         obs = out[0] if isinstance(out, tuple) else out
         return self._stack(obs)
 
-    def step(self, a_norm: Tensor) -> tuple[Tensor, Tensor, Tensor, dict]:
-        act = {}
-        for i, aid in enumerate(self.agent_ids):
-            act[aid] = a_norm[:, 3 * i:3 * i + 3].clamp(-1.0, 1.0) * self.action_scale
+    def step(self, actions: Tensor) -> tuple[Tensor, Tensor, Tensor, dict]:
+        commands = {}
+        for i, agent_id in enumerate(self.agent_ids):
+            commands[agent_id] = actions[:, 3 * i:3 * i + 3].clamp(-1.0, 1.0) * self.action_scale
             if self._partner is not None and i == self._partner["slot"]:
-                act[aid] = self._perturb(act[aid])
-        obs, rew, term, trunc, extras = self.env.step(act)
-        r = sum(rew[a].to(self.device) for a in self.agent_ids)
+                commands[agent_id] = self._perturb(commands[agent_id])
+        obs, rewards, term, trunc, extras = self.env.step(commands)
+        reward = sum(rewards[agent].to(self.device) for agent in self.agent_ids)
         done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        for a in self.agent_ids:
-            done |= term[a].bool() | trunc[a].bool()
+        for agent in self.agent_ids:
+            done |= term[agent].bool() | trunc[agent].bool()
         log = {}
-        for k, v in (extras.get("log", {}) or {}).items():
+        for key, value in (extras.get("log", {}) or {}).items():
             try:
-                log[k] = float(v)
+                log[key] = float(value)
             except (TypeError, ValueError):
                 pass
-        return self._stack(obs), r, done, log
+        return self._stack(obs), reward, done, log
 
     @torch.no_grad()
     def safety_state(self) -> SafetyState:
         env = self.env
         origins = env.scene.env_origins[:, :2]
         board_xy = env._board.data.root_pos_w[:, :2] - origins
-        board_yaw = self._yaw(env._board.data.root_quat_w)
-        rx, ry = [], []
-        for aid in self.all_ids:
-            rob = env.robots[aid]
-            rx.append(rob.data.root_pos_w[:, :2] - origins)
-            ry.append(self._yaw(rob.data.root_quat_w))
+        board_yaw = self._heading_yaw(env._board.data.root_quat_w)
+        positions, yaws = [], []
+        for agent_id in self.all_ids:
+            robot = env.robots[agent_id]
+            positions.append(robot.data.root_pos_w[:, :2] - origins)
+            yaws.append(self._heading_yaw(robot.data.root_quat_w))
         return SafetyState(board_xy=board_xy, board_yaw=board_yaw,
-                           robot_xy=torch.stack(rx, 1), robot_yaw=torch.stack(ry, 1),
+                           robot_xy=torch.stack(positions, 1), robot_yaw=torch.stack(yaws, 1),
                            controlled=self.controlled, anchors_local=self.anchors_local,
                            aabbs=self.aabbs, action_scale=self.action_scale)

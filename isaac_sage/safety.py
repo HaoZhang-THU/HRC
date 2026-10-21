@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -47,273 +47,283 @@ class SafetyState:
 
 @dataclass
 class RowSet:
-    C: Tensor
-    c: Tensor
+    coef: Tensor
+    bound: Tensor
     mask: Tensor
-    h: Tensor
+    barrier: Tensor
     family: Tensor
 
-    def margins(self, a: Tensor) -> Tensor:
-        s = torch.einsum("bkd,bd->bk", self.C, a) - self.c
-        return torch.where(self.mask > 0, s, torch.full_like(s, float("inf")))
+    def margins(self, actions: Tensor) -> Tensor:
+        slack = torch.einsum("bkd,bd->bk", self.coef, actions) - self.bound
+        return torch.where(self.mask > 0, slack, torch.full_like(slack, float("inf")))
 
-    def violated(self, a: Tensor) -> Tensor:
-        return (self.margins(a) < 0).any(dim=1)
+    def violated(self, actions: Tensor) -> Tensor:
+        return (self.margins(actions) < 0).any(dim=1)
 
     def detach(self) -> "RowSet":
-        return RowSet(self.C.detach(), self.c.detach(), self.mask.detach(),
-                      self.h.detach(), self.family)
+        return RowSet(self.coef.detach(), self.bound.detach(), self.mask.detach(),
+                      self.barrier.detach(), self.family)
 
 
-def rot2(yaw: Tensor) -> Tensor:
+def rotation_2d(yaw: Tensor) -> Tensor:
     c, s = torch.cos(yaw), torch.sin(yaw)
     return torch.stack((torch.stack((c, -s), -1), torch.stack((s, c), -1)), -2)
 
 
-def _perp(v: Tensor) -> Tensor:
+def _perpendicular(v: Tensor) -> Tensor:
     return torch.stack((-v[..., 1], v[..., 0]), dim=-1)
 
 
-def point_box_distance(p: Tensor, boxes: Tensor) -> tuple[Tensor, Tensor]:
+def point_box_distance(points: Tensor, boxes: Tensor) -> tuple[Tensor, Tensor]:
     x0, x1, y0, y1 = (boxes[:, i].view(1, 1, -1) for i in range(4))
-    px, py = p[..., 0:1], p[..., 1:2]
-    cx = torch.minimum(torch.maximum(px, x0), x1)
-    cy = torch.minimum(torch.maximum(py, y0), y1)
-    gx, gy = px - cx, py - cy
-    d_out = torch.sqrt(gx * gx + gy * gy + 1e-12)
-    inside = (gx.abs() < 1e-9) & (gy.abs() < 1e-9)
-    pen = torch.stack((px - x0, x1 - px, py - y0, y1 - py), dim=-1)
-    pen_min, axis = pen.min(dim=-1)
-    n_in = torch.zeros(p.shape[0], p.shape[1], boxes.shape[0], 2, device=p.device, dtype=p.dtype)
-    n_in[..., 0] = torch.where(axis == 0, -1.0, torch.where(axis == 1, 1.0, 0.0))
-    n_in[..., 1] = torch.where(axis == 2, -1.0, torch.where(axis == 3, 1.0, 0.0))
-    n_out = torch.stack((gx, gy), dim=-1) / d_out.unsqueeze(-1)
-    d = torch.where(inside, -pen_min, d_out)
-    n = torch.where(inside.unsqueeze(-1), n_in, n_out)
-    return d, n
+    px, py = points[..., 0:1], points[..., 1:2]
+    closest_x = torch.minimum(torch.maximum(px, x0), x1)
+    closest_y = torch.minimum(torch.maximum(py, y0), y1)
+    dx, dy = px - closest_x, py - closest_y
+    dist_out = torch.sqrt(dx * dx + dy * dy + 1e-12)
+    inside = (dx.abs() < 1e-9) & (dy.abs() < 1e-9)
+    depth = torch.stack((px - x0, x1 - px, py - y0, y1 - py), dim=-1)
+    min_depth, axis = depth.min(dim=-1)
+    normal_in = torch.zeros(
+        points.shape[0], points.shape[1], boxes.shape[0], 2, device=points.device, dtype=points.dtype
+    )
+    normal_in[..., 0] = torch.where(axis == 0, -1.0, torch.where(axis == 1, 1.0, 0.0))
+    normal_in[..., 1] = torch.where(axis == 2, -1.0, torch.where(axis == 3, 1.0, 0.0))
+    normal_out = torch.stack((dx, dy), dim=-1) / dist_out.unsqueeze(-1)
+    dist = torch.where(inside, -min_depth, dist_out)
+    normal = torch.where(inside.unsqueeze(-1), normal_in, normal_out)
+    return dist, normal
 
 
 class FormationSafetyModel:
     def __init__(self, cfg: SafetyConfig):
         self.cfg = cfg
-        L, W = cfg.board_length, cfg.board_width
-        xs = torch.linspace(-L / 2, L / 2, cfg.perimeter_samples)
-        top = torch.stack((xs, torch.full_like(xs, W / 2)), 1)
-        bot = torch.stack((xs, torch.full_like(xs, -W / 2)), 1)
-        ends = torch.tensor([[L / 2, 0.0], [-L / 2, 0.0]])
-        self.perimeter_local = torch.cat((top, bot, ends), 0)
-        self.half = torch.tensor([L / 2, W / 2])
+        length, width = cfg.board_length, cfg.board_width
+        xs = torch.linspace(-length / 2, length / 2, cfg.perimeter_samples)
+        top = torch.stack((xs, torch.full_like(xs, width / 2)), 1)
+        bottom = torch.stack((xs, torch.full_like(xs, -width / 2)), 1)
+        ends = torch.tensor([[length / 2, 0.0], [-length / 2, 0.0]])
+        self.perimeter_local = torch.cat((top, bottom, ends), 0)
+        self.half = torch.tensor([length / 2, width / 2])
 
-    def displacement_maps(self, st: SafetyState) -> tuple[Tensor, Tensor, Tensor]:
-        B = st.board_xy.shape[0]
-        N = st.controlled.shape[0]
-        da = 3 * N
-        dev, dt = st.board_xy.device, st.board_xy.dtype
-        g = self.cfg.realization_gain
-        s_lin = st.action_scale[0]
-        s_yaw = st.action_scale[2]
+    def displacement_maps(self, state: SafetyState) -> tuple[Tensor, Tensor, Tensor]:
+        num_envs = state.board_xy.shape[0]
+        num_agents = state.controlled.shape[0]
+        act_dim = 3 * num_agents
+        device, dtype = state.board_xy.device, state.board_xy.dtype
+        gain = self.cfg.realization_gain
+        lin_scale = state.action_scale[0]
+        yaw_scale = state.action_scale[2]
 
-        D = torch.zeros(B, N, 2, da, device=dev, dtype=dt)
-        rho = torch.zeros(B, N, 2, device=dev, dtype=dt)
-        for i in range(N):
-            r = int(st.controlled[i])
-            R = rot2(st.robot_yaw[:, r])
-            D[:, i, :, 3 * i:3 * i + 2] = g * s_lin * R
-            rho[:, i] = st.robot_xy[:, r] - st.board_xy
-        V = D.mean(dim=1)
-        rel = D - V.unsqueeze(1)
-        cross = rho[..., 0:1] * rel[:, :, 1, :] - rho[..., 1:2] * rel[:, :, 0, :]
-        denom = (rho * rho).sum(dim=(1, 2)).clamp_min(1e-6)
-        Omega = cross.sum(dim=1) / denom.unsqueeze(-1)
+        robot_maps = torch.zeros(num_envs, num_agents, 2, act_dim, device=device, dtype=dtype)
+        offsets = torch.zeros(num_envs, num_agents, 2, device=device, dtype=dtype)
+        for i in range(num_agents):
+            robot = int(state.controlled[i])
+            rot = rotation_2d(state.robot_yaw[:, robot])
+            robot_maps[:, i, :, 3 * i:3 * i + 2] = gain * lin_scale * rot
+            offsets[:, i] = state.robot_xy[:, robot] - state.board_xy
+        vel_map = robot_maps.mean(dim=1)
+        rel = robot_maps - vel_map.unsqueeze(1)
+        cross = offsets[..., 0:1] * rel[:, :, 1, :] - offsets[..., 1:2] * rel[:, :, 0, :]
+        denom = (offsets * offsets).sum(dim=(1, 2)).clamp_min(1e-6)
+        yaw_map = cross.sum(dim=1) / denom.unsqueeze(-1)
         if self.cfg.dpsi_to_board_yaw != 0.0:
-            for i in range(N):
-                Omega[:, 3 * i + 2] += self.cfg.dpsi_to_board_yaw * s_yaw / N
-        return D, V, Omega
+            for i in range(num_agents):
+                yaw_map[:, 3 * i + 2] += self.cfg.dpsi_to_board_yaw * yaw_scale / num_agents
+        return robot_maps, vel_map, yaw_map
 
     @staticmethod
-    def point_maps(V: Tensor, Omega: Tensor, rho: Tensor) -> Tensor:
-        return V.unsqueeze(1) + _perp(rho).unsqueeze(-1) * Omega[:, None, None, :]
+    def point_maps(vel_map: Tensor, yaw_map: Tensor, offsets: Tensor) -> Tensor:
+        return vel_map.unsqueeze(1) + _perpendicular(offsets).unsqueeze(-1) * yaw_map[:, None, None, :]
 
-    def rows(self, st: SafetyState) -> RowSet:
+    def rows(self, state: SafetyState) -> RowSet:
         cfg = self.cfg
-        B = st.board_xy.shape[0]
-        N = st.controlled.shape[0]
-        da = 3 * N
-        dev, dt = st.board_xy.device, st.board_xy.dtype
+        num_envs = state.board_xy.shape[0]
+        num_agents = state.controlled.shape[0]
+        act_dim = 3 * num_agents
+        device, dtype = state.board_xy.device, state.board_xy.dtype
         eta = cfg.eta
-        D, V, Omega = self.displacement_maps(st)
-        Rb = rot2(st.board_yaw)
-        curv_w = 0.5 * cfg.yaw_step_bound ** 2 if cfg.curvature_margin else 0.0
+        robot_maps, vel_map, yaw_map = self.displacement_maps(state)
+        board_rot = rotation_2d(state.board_yaw)
+        curv_weight = 0.5 * cfg.yaw_step_bound ** 2 if cfg.curvature_margin else 0.0
 
-        C_list, c_list, h_list, f_list, m_list = [], [], [], [], []
+        coef_list, bound_list, barrier_list, family_list, mask_list = [], [], [], [], []
 
-        def _add(C, c, h, fam, active):
-            C_list.append(C)
-            c_list.append(c)
-            h_list.append(h)
-            f_list.append(torch.full_like(h, fam, dtype=torch.long))
-            m_list.append(active.to(dt))
+        def _add(coef, bound, barrier, family, active):
+            coef_list.append(coef)
+            bound_list.append(bound)
+            barrier_list.append(barrier)
+            family_list.append(torch.full_like(barrier, family, dtype=torch.long))
+            mask_list.append(active.to(dtype))
 
-        per_local = self.perimeter_local.to(dev, dt)
-        per_rho = torch.einsum("bij,pj->bpi", Rb, per_local)
-        robot_rho = st.robot_xy - st.board_xy.unsqueeze(1)
-        pts_rho = torch.cat((per_rho, robot_rho), dim=1)
-        radius = torch.cat((torch.zeros(per_rho.shape[1], device=dev, dtype=dt),
-                            torch.full((robot_rho.shape[1],), cfg.robot_radius, device=dev, dtype=dt)))
-        pts = st.board_xy.unsqueeze(1) + pts_rho
-        Pq = self.point_maps(V, Omega, pts_rho)
-        curv = curv_w * pts_rho.norm(dim=-1)
+        perimeter = self.perimeter_local.to(device, dtype)
+        perimeter_offsets = torch.einsum("bij,pj->bpi", board_rot, perimeter)
+        robot_offsets = state.robot_xy - state.board_xy.unsqueeze(1)
+        point_offsets = torch.cat((perimeter_offsets, robot_offsets), dim=1)
+        radius = torch.cat((torch.zeros(perimeter_offsets.shape[1], device=device, dtype=dtype),
+                            torch.full((robot_offsets.shape[1],), cfg.robot_radius, device=device, dtype=dtype)))
+        points = state.board_xy.unsqueeze(1) + point_offsets
+        point_map = self.point_maps(vel_map, yaw_map, point_offsets)
+        curv = curv_weight * point_offsets.norm(dim=-1)
 
-        M = st.aabbs.shape[0]
-        if M > 0:
-            d, n = point_box_distance(pts, st.aabbs)
-            h = d - radius.view(1, -1, 1) - cfg.obstacle_margin
-            C = torch.einsum("bqmi,bqid->bqmd", n, Pq)
-            c = -eta * h + curv.unsqueeze(-1)
-            _add(C.reshape(B, -1, da), c.reshape(B, -1), h.reshape(B, -1),
-                 F_COLLISION, (h <= cfg.activation_distance).reshape(B, -1))
+        num_boxes = state.aabbs.shape[0]
+        if num_boxes > 0:
+            dist, normal = point_box_distance(points, state.aabbs)
+            barrier = dist - radius.view(1, -1, 1) - cfg.obstacle_margin
+            coef = torch.einsum("bqmi,bqid->bqmd", normal, point_map)
+            bound = -eta * barrier + curv.unsqueeze(-1)
+            _add(coef.reshape(num_envs, -1, act_dim), bound.reshape(num_envs, -1), barrier.reshape(num_envs, -1),
+                 F_COLLISION, (barrier <= cfg.activation_distance).reshape(num_envs, -1))
 
-            x0, x1, y0, y1 = (st.aabbs[:, i] for i in range(4))
+            x0, x1, y0, y1 = (state.aabbs[:, i] for i in range(4))
             corners = torch.stack((torch.stack((x0, y0), 1), torch.stack((x1, y0), 1),
                                    torch.stack((x1, y1), 1), torch.stack((x0, y1), 1)), 1)
             corners = corners.reshape(-1, 2)
-            rel = corners.view(1, -1, 2) - st.board_xy.unsqueeze(1)
-            local = torch.einsum("bji,bqj->bqi", Rb, rel)
-            half = self.half.to(dev, dt)
+            rel = corners.view(1, -1, 2) - state.board_xy.unsqueeze(1)
+            local = torch.einsum("bji,bqj->bqi", board_rot, rel)
+            half = self.half.to(device, dtype)
             closest = torch.maximum(torch.minimum(local, half), -half)
             gap = local - closest
-            d_out = gap.norm(dim=-1)
-            inside = d_out < 1e-9
+            dist_out = gap.norm(dim=-1)
+            inside = dist_out < 1e-9
             over = half - local.abs()
-            over_min, axis = over.min(dim=-1)
-            n_in = torch.zeros_like(local)
-            sgn = torch.sign(local.gather(-1, axis.unsqueeze(-1)).squeeze(-1))
-            n_in.scatter_(-1, axis.unsqueeze(-1), sgn.unsqueeze(-1))
-            n_local = torch.where(inside.unsqueeze(-1), n_in, gap / d_out.clamp_min(1e-12).unsqueeze(-1))
-            d = torch.where(inside, -over_min, d_out)
-            n_world = torch.einsum("bij,bqj->bqi", Rb, n_local)
-            contact_rho = torch.einsum("bij,bqj->bqi", Rb, closest)
-            Pc = self.point_maps(V, Omega, contact_rho)
-            h = d - cfg.obstacle_margin
-            C = -torch.einsum("bqi,bqid->bqd", n_world, Pc)
-            c = -eta * h + curv_w * contact_rho.norm(dim=-1)
-            _add(C, c, h, F_COLLISION, h <= cfg.activation_distance)
+            min_over, axis = over.min(dim=-1)
+            normal_in = torch.zeros_like(local)
+            sign = torch.sign(local.gather(-1, axis.unsqueeze(-1)).squeeze(-1))
+            normal_in.scatter_(-1, axis.unsqueeze(-1), sign.unsqueeze(-1))
+            normal_local = torch.where(inside.unsqueeze(-1), normal_in, gap / dist_out.clamp_min(1e-12).unsqueeze(-1))
+            dist = torch.where(inside, -min_over, dist_out)
+            normal_world = torch.einsum("bij,bqj->bqi", board_rot, normal_local)
+            contact_offsets = torch.einsum("bij,bqj->bqi", board_rot, closest)
+            contact_map = self.point_maps(vel_map, yaw_map, contact_offsets)
+            barrier = dist - cfg.obstacle_margin
+            coef = -torch.einsum("bqi,bqid->bqd", normal_world, contact_map)
+            bound = -eta * barrier + curv_weight * contact_offsets.norm(dim=-1)
+            _add(coef, bound, barrier, F_COLLISION, barrier <= cfg.activation_distance)
 
         if cfg.use_grasp_rows:
-            for i in range(N):
-                r = int(st.controlled[i])
-                anchor_rho = torch.einsum("bij,j->bi", Rb, st.anchors_local[r].to(dev, dt))
-                e = torch.einsum("bji,bj->bi", Rb, st.robot_xy[:, r] - st.board_xy) - st.anchors_local[r].to(dev, dt)
-                Pa = self.point_maps(V, Omega, anchor_rho.unsqueeze(1))[:, 0]
-                E = torch.einsum("bji,bjd->bid", Rb, D[:, i] - Pa)
+            for i in range(num_agents):
+                robot = int(state.controlled[i])
+                anchor_offset = torch.einsum("bij,j->bi", board_rot, state.anchors_local[robot].to(device, dtype))
+                grasp_error = torch.einsum(
+                    "bji,bj->bi", board_rot, state.robot_xy[:, robot] - state.board_xy
+                ) - state.anchors_local[robot].to(device, dtype)
+                anchor_map = self.point_maps(vel_map, yaw_map, anchor_offset.unsqueeze(1))[:, 0]
+                error_map = torch.einsum("bji,bjd->bid", board_rot, robot_maps[:, i] - anchor_map)
                 for k in range(2):
-                    for sgn_ in (1.0, -1.0):
-                        h = cfg.grasp_band - sgn_ * e[:, k]
-                        C = -sgn_ * E[:, k, :]
-                        c = -eta * h
-                        _add(C.unsqueeze(1), c.unsqueeze(1), h.unsqueeze(1), F_GRASP,
-                             torch.ones(B, 1, device=dev, dtype=torch.bool))
+                    for side in (1.0, -1.0):
+                        barrier = cfg.grasp_band - side * grasp_error[:, k]
+                        coef = -side * error_map[:, k, :]
+                        bound = -eta * barrier
+                        _add(coef.unsqueeze(1), bound.unsqueeze(1), barrier.unsqueeze(1), F_GRASP,
+                             torch.ones(num_envs, 1, device=device, dtype=torch.bool))
 
         if cfg.use_rotation_rows:
-            for sgn_ in (1.0, -1.0):
-                h = torch.full((B, 1), cfg.yaw_step_bound, device=dev, dtype=dt)
-                _add((sgn_ * Omega).unsqueeze(1), -h, h, F_ROTATION,
-                     torch.ones(B, 1, device=dev, dtype=torch.bool))
+            for side in (1.0, -1.0):
+                barrier = torch.full((num_envs, 1), cfg.yaw_step_bound, device=device, dtype=dtype)
+                _add((side * yaw_map).unsqueeze(1), -barrier, barrier, F_ROTATION,
+                     torch.ones(num_envs, 1, device=device, dtype=torch.bool))
 
         if cfg.workspace_box is not None:
             wx0, wx1, wy0, wy1 = cfg.workspace_box
-            for axis_, sgn_, lim in ((0, 1.0, wx0), (0, -1.0, wx1), (1, 1.0, wy0), (1, -1.0, wy1)):
-                h = sgn_ * (pts[..., axis_] - lim) - radius.view(1, -1) - cfg.obstacle_margin
-                C = sgn_ * Pq[:, :, axis_, :]
-                c = -eta * h + curv
-                _add(C, c, h, F_WORKSPACE, h <= cfg.activation_distance)
+            for ax, side, limit in ((0, 1.0, wx0), (0, -1.0, wx1), (1, 1.0, wy0), (1, -1.0, wy1)):
+                barrier = side * (points[..., ax] - limit) - radius.view(1, -1) - cfg.obstacle_margin
+                coef = side * point_map[:, :, ax, :]
+                bound = -eta * barrier + curv
+                _add(coef, bound, barrier, F_WORKSPACE, barrier <= cfg.activation_distance)
 
-        if not C_list:
-            K = cfg.max_rows
-            return RowSet(torch.zeros(B, K, da, device=dev, dtype=dt), torch.zeros(B, K, device=dev, dtype=dt),
-                          torch.zeros(B, K, device=dev, dtype=dt), torch.zeros(B, K, device=dev, dtype=dt),
-                          torch.zeros(B, K, device=dev, dtype=torch.long))
+        if not coef_list:
+            num_rows = cfg.max_rows
+            return RowSet(
+                torch.zeros(num_envs, num_rows, act_dim, device=device, dtype=dtype),
+                torch.zeros(num_envs, num_rows, device=device, dtype=dtype),
+                torch.zeros(num_envs, num_rows, device=device, dtype=dtype),
+                torch.zeros(num_envs, num_rows, device=device, dtype=dtype),
+                torch.zeros(num_envs, num_rows, device=device, dtype=torch.long),
+            )
 
-        C_all = torch.cat(C_list, 1)
-        c_all = torch.cat(c_list, 1)
-        h_all = torch.cat(h_list, 1)
-        f_all = torch.cat(f_list, 1)
-        m_all = torch.cat(m_list, 1)
-        m_all = m_all * (C_all.norm(dim=-1) > 1e-9).to(dt)
+        coef_all = torch.cat(coef_list, 1)
+        bound_all = torch.cat(bound_list, 1)
+        barrier_all = torch.cat(barrier_list, 1)
+        family_all = torch.cat(family_list, 1)
+        mask_all = torch.cat(mask_list, 1)
+        mask_all = mask_all * (coef_all.norm(dim=-1) > 1e-9).to(dtype)
         if cfg.recovery_cap is not None:
-            c_all = torch.where(h_all < 0, c_all.clamp(max=cfg.recovery_cap), c_all)
+            bound_all = torch.where(barrier_all < 0, bound_all.clamp(max=cfg.recovery_cap), bound_all)
 
-        K = cfg.max_rows
-        short = K - C_all.shape[1]
-        if short > 0:
-            C_all = torch.cat((C_all, C_all.new_zeros(B, short, da)), 1)
-            c_all = torch.cat((c_all, c_all.new_zeros(B, short)), 1)
-            h_all = torch.cat((h_all, h_all.new_zeros(B, short)), 1)
-            f_all = torch.cat((f_all, f_all.new_zeros(B, short)), 1)
-            m_all = torch.cat((m_all, m_all.new_zeros(B, short)), 1)
-        score = torch.where(m_all > 0, h_all, torch.full_like(h_all, float("inf")))
-        idx = score.topk(K, dim=1, largest=False).indices
-        gidx = idx.unsqueeze(-1).expand(-1, -1, da)
-        return RowSet(C_all.gather(1, gidx), c_all.gather(1, idx), m_all.gather(1, idx),
-                      h_all.gather(1, idx), f_all.gather(1, idx))
+        num_rows = cfg.max_rows
+        pad = num_rows - coef_all.shape[1]
+        if pad > 0:
+            coef_all = torch.cat((coef_all, coef_all.new_zeros(num_envs, pad, act_dim)), 1)
+            bound_all = torch.cat((bound_all, bound_all.new_zeros(num_envs, pad)), 1)
+            barrier_all = torch.cat((barrier_all, barrier_all.new_zeros(num_envs, pad)), 1)
+            family_all = torch.cat((family_all, family_all.new_zeros(num_envs, pad)), 1)
+            mask_all = torch.cat((mask_all, mask_all.new_zeros(num_envs, pad)), 1)
+        score = torch.where(mask_all > 0, barrier_all, torch.full_like(barrier_all, float("inf")))
+        idx = score.topk(num_rows, dim=1, largest=False).indices
+        coef_index = idx.unsqueeze(-1).expand(-1, -1, act_dim)
+        return RowSet(coef_all.gather(1, coef_index), bound_all.gather(1, idx), mask_all.gather(1, idx),
+                      barrier_all.gather(1, idx), family_all.gather(1, idx))
 
     @torch.no_grad()
-    def exact_projection(self, a: Tensor, rows: RowSet, fixed: Optional[Tensor] = None,
+    def exact_projection(self, actions: Tensor, rows: RowSet, fixed: Optional[Tensor] = None,
                          iterations: Optional[int] = None) -> tuple[Tensor, dict]:
         cfg = self.cfg
-        iters = iterations or cfg.qp_iterations
-        B, K, da = rows.C.shape
-        dev, dt = a.device, a.dtype
-        C, c, m = rows.C, rows.c.clone(), rows.mask
+        num_iters = iterations or cfg.qp_iterations
+        num_envs, num_rows, act_dim = rows.coef.shape
+        device, dtype = actions.device, actions.dtype
+        coef, bound, mask = rows.coef, rows.bound.clone(), rows.mask
         if fixed is not None:
-            fixed = fixed.to(dev)
-            c = c - torch.einsum("bkd,bd->bk", C[:, :, fixed], a[:, fixed])
+            fixed = fixed.to(device)
+            bound = bound - torch.einsum("bkd,bd->bk", coef[:, :, fixed], actions[:, fixed])
             free = ~fixed
-            C = C[:, :, free]
-            a_free = a[:, free]
+            coef = coef[:, :, free]
+            free_actions = actions[:, free]
         else:
             free = None
-            a_free = a
-        d = a_free.shape[1]
-        eye = torch.eye(d, device=dev, dtype=dt).unsqueeze(0).expand(B, d, d)
-        G = torch.cat((-C, eye, -eye), dim=1)
-        g = torch.cat((-c, torch.ones(B, 2 * d, device=dev, dtype=dt)), dim=1)
-        mk = torch.cat((m, torch.ones(B, 2 * d, device=dev, dtype=dt)), dim=1)
-        H = torch.bmm(G, G.transpose(1, 2))
-        b = torch.einsum("bmd,bd->bm", G, a_free) - g
-        Hc, bc, mc = (t.detach().to("cpu", torch.float64) for t in (H, b, mk))
-        diag = torch.diagonal(Hc, dim1=1, dim2=2).clamp_min(1e-12)
-        lam_c = torch.zeros(B, K + 2 * d, dtype=torch.float64)
-        Ht = Hc.transpose(0, 1).contiguous()
-        for _ in range(iters):
-            for k in range(K + 2 * d):
-                r_k = bc[:, k] - (Ht[k] * lam_c).sum(-1)
-                lam_c[:, k] = torch.clamp(lam_c[:, k] + r_k / diag[:, k], min=0.0) * mc[:, k]
-        lam = lam_c.to(dev, dt)
-        x = (a_free - torch.einsum("bmd,bm->bd", G, lam)).clamp(-1.0, 1.0)
+            free_actions = actions
+        dim = free_actions.shape[1]
+        eye = torch.eye(dim, device=device, dtype=dtype).unsqueeze(0).expand(num_envs, dim, dim)
+        lhs = torch.cat((-coef, eye, -eye), dim=1)
+        rhs = torch.cat((-bound, torch.ones(num_envs, 2 * dim, device=device, dtype=dtype)), dim=1)
+        full_mask = torch.cat((mask, torch.ones(num_envs, 2 * dim, device=device, dtype=dtype)), dim=1)
+        gram = torch.bmm(lhs, lhs.transpose(1, 2))
+        offset = torch.einsum("bmd,bd->bm", lhs, free_actions) - rhs
+        gram_cpu, offset_cpu, mask_cpu = (
+            tensor.detach().to("cpu", torch.float64) for tensor in (gram, offset, full_mask)
+        )
+        diag = torch.diagonal(gram_cpu, dim1=1, dim2=2).clamp_min(1e-12)
+        dual_cpu = torch.zeros(num_envs, num_rows + 2 * dim, dtype=torch.float64)
+        gram_t = gram_cpu.transpose(0, 1).contiguous()
+        for _ in range(num_iters):
+            for k in range(num_rows + 2 * dim):
+                res = offset_cpu[:, k] - (gram_t[k] * dual_cpu).sum(-1)
+                dual_cpu[:, k] = torch.clamp(dual_cpu[:, k] + res / diag[:, k], min=0.0) * mask_cpu[:, k]
+        duals = dual_cpu.to(device, dtype)
+        solution = (free_actions - torch.einsum("bmd,bm->bd", lhs, duals)).clamp(-1.0, 1.0)
         if free is not None:
-            out = a.clone()
-            out[:, free] = x
+            out = actions.clone()
+            out[:, free] = solution
         else:
-            out = x
-        resid = torch.einsum("bkd,bd->bk", C, x) - c
-        resid = torch.where(m > 0, resid, torch.full_like(resid, float("inf")))
-        min_resid = resid.min(dim=1).values
-        dual = lam[:, :K]
-        active = (resid <= cfg.qp_tolerance) & (dual > 1e-7)
+            out = solution
+        residual = torch.einsum("bkd,bd->bk", coef, solution) - bound
+        residual = torch.where(mask > 0, residual, torch.full_like(residual, float("inf")))
+        min_residual = residual.min(dim=1).values
+        dual = duals[:, :num_rows]
+        active = (residual <= cfg.qp_tolerance) & (dual > 1e-7)
         info = {
             "dual": dual,
             "active": active,
-            "min_residual": min_resid,
-            "feasible": min_resid >= -cfg.qp_tolerance,
-            "correction": (out - a).norm(dim=-1),
+            "min_residual": min_residual,
+            "feasible": min_residual >= -cfg.qp_tolerance,
+            "correction": (out - actions).norm(dim=-1),
         }
         return out, info
 
 
 def normalize_rows(rows: RowSet) -> RowSet:
-    nrm = rows.C.norm(dim=-1)
-    ok = (nrm > 1e-9) & (rows.mask > 0)
-    scale = torch.where(ok, 1.0 / nrm.clamp_min(1e-9), torch.zeros_like(nrm))
-    return RowSet(rows.C * scale.unsqueeze(-1), rows.c * scale, ok.to(rows.mask.dtype),
-                  rows.h, rows.family)
+    norms = rows.coef.norm(dim=-1)
+    ok = (norms > 1e-9) & (rows.mask > 0)
+    scale = torch.where(ok, 1.0 / norms.clamp_min(1e-9), torch.zeros_like(norms))
+    return RowSet(rows.coef * scale.unsqueeze(-1), rows.bound * scale, ok.to(rows.mask.dtype),
+                  rows.barrier, rows.family)

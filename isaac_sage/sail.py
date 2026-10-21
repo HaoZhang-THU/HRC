@@ -7,21 +7,21 @@ from torch import Tensor
 from .safety import RowSet, normalize_rows
 
 
-def sail_penalty_map(a_st: Tensor, rows: RowSet, kappa: float,
+def sail_penalty_map(actions: Tensor, rows: RowSet, kappa: float,
                      newton_steps: int = 8, damping: float = 1.0) -> Tensor:
-    rn = normalize_rows(rows)
-    Cn, cn, m = rn.C, rn.c, rn.mask
-    u = a_st
-    eye = torch.eye(a_st.shape[-1], dtype=a_st.dtype, device=a_st.device)
+    norm_rows = normalize_rows(rows)
+    coef, bound, mask = norm_rows.coef, norm_rows.bound, norm_rows.mask
+    point = actions
+    eye = torch.eye(actions.shape[-1], dtype=actions.dtype, device=actions.device)
     for _ in range(newton_steps):
-        s = cn - torch.einsum("bkd,bd->bk", Cn, u)
-        act = F.relu(s) * m
-        grad = (u - a_st) - kappa * torch.einsum("bk,bkd->bd", act, Cn)
-        w = (s > 0).to(a_st.dtype) * m
-        hess = eye + kappa * torch.einsum("bk,bkd,bke->bde", w, Cn, Cn)
-        step = torch.linalg.solve(hess, grad.unsqueeze(-1)).squeeze(-1)
-        u = u - damping * step
-    return u
+        slack = bound - torch.einsum("bkd,bd->bk", coef, point)
+        active = F.relu(slack) * mask
+        grad = (point - actions) - kappa * torch.einsum("bk,bkd->bd", active, coef)
+        weights = (slack > 0).to(actions.dtype) * mask
+        hessian = eye + kappa * torch.einsum("bk,bkd,bke->bde", weights, coef, coef)
+        step = torch.linalg.solve(hessian, grad.unsqueeze(-1)).squeeze(-1)
+        point = point - damping * step
+    return point
 
 
 def sail_jacobian_normal_gain(kappa: float) -> float:

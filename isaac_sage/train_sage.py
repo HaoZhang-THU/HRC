@@ -126,7 +126,6 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import isaaclab
-import torch
 
 import isaaclab_tasks
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
@@ -169,8 +168,8 @@ def _configure_env_cfg(cfg):
         cfg.low_level_policy_path = args_cli.low_level_policy_path
     if args_cli.scene_json is not None:
         scene = json.loads(Path(args_cli.scene_json).read_text())
-        cfg.obstacle_specs = [(tuple(s), tuple(p)) for s, p in scene["obstacle_specs"]]
-        cfg.path_waypoints = [tuple(w) for w in scene["path_waypoints"]]
+        cfg.obstacle_specs = [(tuple(size), tuple(pos)) for size, pos in scene["obstacle_specs"]]
+        cfg.path_waypoints = [tuple(waypoint) for waypoint in scene["path_waypoints"]]
         cfg.start_xy = tuple(scene.get("start_xy", scene["path_waypoints"][0]))
         cfg.use_fixed_path = True
         if "env_spacing" in scene:
@@ -187,7 +186,7 @@ def main():
     env_cfg = _configure_env_cfg(env_cfg)
     if args_cli.ungate_progress and args_cli.projection_progress:
         raise ValueError("--projection_progress already pays progress whatever the heading; drop --ungate_progress")
-    task_opts = {k: getattr(args_cli, k) for k in TASK_OPTIONS}
+    task_opts = {key: getattr(args_cli, key) for key in TASK_OPTIONS}
     configure_task_cfg(env_cfg, task_opts)
     env = gym.make(args_cli.task, cfg=env_cfg)
     if args_cli.ungate_progress:
@@ -219,9 +218,9 @@ def main():
     if args_cli.activate_lidar:
         if args_cli.mask_lidar:
             raise ValueError("--activate_lidar and --mask_lidar are mutually exclusive")
-        rays = int(env_cfg.lidar_num_rays)
-        core = (adapter.obs_dim_per - rays) // 3
-        activate_dims = list(range(core, core + rays))
+        num_rays = int(env_cfg.lidar_num_rays)
+        core_dim = (adapter.obs_dim_per - num_rays) // 3
+        activate_dims = list(range(core_dim, core_dim + num_rays))
 
     safety = SafetyConfig(obstacle_margin=args_cli.obstacle_margin,
                           activation_distance=args_cli.activation_distance, eta=args_cli.eta,
