@@ -29,14 +29,16 @@ SCENE="${SCENE:-tilt_gate_2m2}"
 SCENE_JSON="isaac_sage/scenes/${SCENE}.json"
 [ -f "$SCENE_JSON" ] || { echo "scene file not found: $SCENE_JSON" >&2; exit 1; }
 
-# 128 envs x 60 high-level steps = 7680 env-steps per iteration; 200 iterations.
+# 128 envs x 60 high-level steps = 7680 env-steps per iteration.  The tau / kappa /
+# curriculum schedules are planned over 2,500,000 env-steps and training stops
+# after 200 iterations.
 NUM_ENVS=128
+SCHEDULE_ENV_STEPS=2500000
 ITERATIONS=200
-NUM_ENV_STEPS=$((NUM_ENVS * 60 * ITERATIONS))      # 1,536,000
 
 COMMON=(
     --seed "$SEED"
-    --num_envs "$NUM_ENVS" --num_steps 60 --num_env_steps "$NUM_ENV_STEPS"
+    --num_envs "$NUM_ENVS" --num_steps 60 --num_env_steps "$SCHEDULE_ENV_STEPS" --max_iters "$ITERATIONS"
     --scene_json "$SCENE_JSON"
     --resume isaac_sage/assets/init/phase1_init.pt --activate_lidar
     --tau_init 2.0 --tau_final 0.4 --tau_anneal_start 0.112 --tau_anneal_end 0.36

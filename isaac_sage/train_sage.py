@@ -22,7 +22,10 @@ parser.add_argument("--task", type=str, default="Isaac-G1-CooperativeTransport-D
 parser.add_argument("--variant", type=str, default="sage", choices=["tree", "tree_cbf", "sail", "talo", "sage"])
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--num_envs", type=int, default=64)
-parser.add_argument("--num_env_steps", type=int, default=20_000_000)
+parser.add_argument("--num_env_steps", type=int, default=20_000_000,
+                    help="Total env-steps the tau / kappa / curriculum schedules are planned over.")
+parser.add_argument("--max_iters", type=int, default=None,
+                    help="Stop after this many iterations (the schedules still follow --num_env_steps).")
 parser.add_argument("--num_steps", type=int, default=60, help="Rollout length per update (high-level steps).")
 parser.add_argument("--exp_name", type=str, default="coop_sage")
 parser.add_argument("--log_dir", type=str, default=None)
@@ -256,7 +259,8 @@ def main():
           resume_load_critic=not args_cli.resume_fresh_critic,
           resume_load_obs_norm=not args_cli.resume_fresh_obsnorm,
           resume_continue=args_cli.resume_continue, stall_timeout_s=args_cli.stall_timeout_s,
-          activate_dims=activate_dims)
+          activate_dims=activate_dims,
+          max_iters=args_cli.max_iters)
     env.close()
 
 

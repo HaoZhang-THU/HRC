@@ -163,12 +163,12 @@ All arms share every setting except the three columns below.
 
 | Setting | Value |
 |---|---|
-| Iterations | 200 iterations of 128 parallel envs × 60 high-level steps = 7,680 env-steps each, i.e. `--num_env_steps 1536000`. The τ and κ schedules are fractions of this total, so a run must not be stopped early or lengthened. |
+| Iterations | `--max_iters 200` iterations of 128 parallel envs × 60 high-level steps = 7,680 env-steps each. The τ, κ and start-curriculum schedules are planned over `--num_env_steps 2500000`, so training stops at iteration 200 of that plan. |
 | Seed and scene | `--seed 1`, `--scene_json isaac_sage/scenes/<SCENE>.json` |
 | Gate temperature τ (straight-through backward pass) | `--tau_init 2.0 --tau_final 0.4 --tau_anneal_start 0.112 --tau_anneal_end 0.36` |
 | Routing | `--hard_finetune_fraction 1.0`: hard routing from the first iteration (forward pass), straight-through gradients through sigmoid(·/τ) (backward pass), and hard routing at deployment. |
-| SAIL κ | `--kappa_init 8 --kappa_final 32`, linear over the whole run |
-| Start curriculum | `--start_curriculum_prob 0.7`. The lower bound of mid-path starts anneals from 0.8 to 0.0 over the first 60 % of training. |
+| SAIL κ | `--kappa_init 8 --kappa_final 32`, linear over the 2,500,000-step plan (κ ≈ 22.7 at iteration 200) |
+| Start curriculum | `--start_curriculum_prob 0.7`. The lower bound of mid-path starts anneals from 0.8 to 0.0 over the first 60 % of the plan. |
 | Partner perturbation | `--partner_noise` |
 | Optimisation | `--actor_lr 1e-4 --critic_lr 5e-5`; PPO 15 epochs × 15 minibatches, `max_grad_norm 0.5`, entropy coefficient 0 (code defaults) |
 | Safety layer | `--obstacle_margin 0.1` |

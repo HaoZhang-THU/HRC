@@ -637,7 +637,8 @@ def train(adapter, cfg: SAGEConfig, total_steps: int, log_dir: Path, device: tor
           seed: int = 1, checkpoint_interval: int = 25, resume: Optional[str] = None,
           resume_load_critic: bool = True, resume_load_obs_norm: bool = True,
           resume_continue: bool = False, stall_timeout_s: float = 900.0,
-          writer=None, print_every: int = 1, activate_dims: Optional[list[int]] = None) -> Path:
+          writer=None, print_every: int = 1, activate_dims: Optional[list[int]] = None,
+          max_iters: Optional[int] = None) -> Path:
     torch.manual_seed(seed)
     np.random.seed(seed)
     trainer = SAGETrainer(adapter, cfg, device)
@@ -657,6 +658,8 @@ def train(adapter, cfg: SAGEConfig, total_steps: int, log_dir: Path, device: tor
     best_path = log_dir / "best_model.pt"
     steps_per_iter = cfg.num_steps * adapter.num_envs
     num_iters = (total_steps + steps_per_iter - 1) // steps_per_iter
+    if max_iters:
+        num_iters = min(num_iters, max_iters)
     start_iter = trainer.total_steps // steps_per_iter
     print(f"[SAGE] variant={cfg.variant} cbf={trainer.use_cbf} sail={trainer.use_sail} talo={trainer.use_talo} "
           f"N={trainer.num_agents} obs/agent={trainer.obs_dim_per} envs={adapter.num_envs} steps/iter={steps_per_iter} "
