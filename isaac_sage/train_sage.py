@@ -19,7 +19,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="SAGE on G1 CooperativeTransport (Isaac Lab).")
 parser.add_argument("--task", type=str, default="Isaac-G1-CooperativeTransport-Direct-v0")
-parser.add_argument("--variant", type=str, default="sage", choices=["tree", "tree_cbf", "sail", "talo", "sage"])
+parser.add_argument("--variant", type=str, default="sage", choices=["happo_tree", "happo_tree_cbf", "sail", "talo", "sage"])
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--num_env_steps", type=int, default=20_000_000,
@@ -62,7 +62,7 @@ parser.add_argument("--sail_damping", type=float, default=1.0)
 parser.add_argument("--talo_sigma", type=float, default=0.1)
 parser.add_argument("--max_grad_norm", type=float, default=0.5)
 parser.add_argument("--critic", type=str, default="auto", choices=["auto", "team", "joint"],
-                    help="auto: joint-observation critic for tree / tree_cbf, team-context critic otherwise.")
+                    help="auto: joint-observation critic for happo_tree / happo_tree_cbf, team-context critic otherwise.")
 parser.add_argument("--actor_update", type=str, default="auto", choices=["auto", "happo", "joint"],
                     help="Actor update of the arms without TALO.  auto/happo: sequential HAPPO updates; "
                          "joint: one clipped joint-ratio step (g_team).  TALO arms always use g_TALO.")

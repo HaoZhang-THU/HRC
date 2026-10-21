@@ -19,13 +19,13 @@ from .talo import talo_update_field
 from .tree_policy import TeamActor
 
 VARIANTS = {
-    "tree":     (False, False, False),
-    "tree_cbf": (True,  False, False),
+    "happo_tree":     (False, False, False),
+    "happo_tree_cbf": (True,  False, False),
     "sail":     (True,  True,  False),
     "talo":     (True,  False, True),
     "sage":     (True,  True,  True),
 }
-JOINT_CRITIC_VARIANTS = ("tree", "tree_cbf")
+JOINT_CRITIC_VARIANTS = ("happo_tree", "happo_tree_cbf")
 
 
 @dataclass

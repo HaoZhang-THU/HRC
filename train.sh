@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Train one arm (or all five, one after another) with the released recipe.
 #
-#   bash train.sh sage              # one arm: tree | tree_cbf | sail | talo | sage
+#   bash train.sh sage              # one arm: happo_tree | happo_tree_cbf | sail | talo | sage
 #   bash train.sh all               # the five arms in that order
 #   bash train.sh sage --foo bar    # extra train_sage.py flags are appended (changes the recipe)
 #   SCENE=<name> bash train.sh sage # scene file isaac_sage/scenes/<name>.json
@@ -15,8 +15,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-ARMS=(tree tree_cbf sail talo sage)
-usage() { echo "usage: bash train.sh {tree|tree_cbf|sail|talo|sage|all} [extra train_sage.py flags]" >&2; exit 1; }
+ARMS=(happo_tree happo_tree_cbf sail talo sage)
+usage() { echo "usage: bash train.sh {happo_tree|happo_tree_cbf|sail|talo|sage|all} [extra train_sage.py flags]" >&2; exit 1; }
 [ $# -ge 1 ] || usage
 ARM="$1"; shift
 
@@ -54,7 +54,7 @@ COMMON=(
 
 arm_args() {
     case "$1" in
-        tree|tree_cbf) echo "--actor_update happo" ;;            # joint-observation critic (auto)
+        happo_tree|happo_tree_cbf) echo "--actor_update happo" ;;            # joint-observation critic (auto)
         sail)          echo "--actor_update happo --critic joint" ;;
         talo|sage)     echo "" ;;                                # g_TALO, team-context critic (auto)
         *) usage ;;

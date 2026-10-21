@@ -30,7 +30,7 @@ parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--num_episodes", type=int, default=30)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--shield", type=str, default="auto", choices=["auto", "on", "off"],
-                    help="auto: off for the unshielded 'tree' arm, on for every other arm.")
+                    help="auto: off for the unshielded 'happo_tree' arm, on for every other arm.")
 parser.add_argument("--episode_length_s", type=float, default=None,
                     help="Default: scene budget if --scene_json is given, else 300 s.")
 parser.add_argument("--scene_json", type=str, default=None)
@@ -277,7 +277,7 @@ def main():
     device = adapter.device
     actor, obs_norm, safety, ckpt_cfg = _load_checkpoint(args_cli.checkpoint, adapter, device)
     variant = str(ckpt_cfg.get("variant", "?"))
-    shield = (variant != "tree") if args_cli.shield == "auto" else (args_cli.shield == "on")
+    shield = (variant != "happo_tree") if args_cli.shield == "auto" else (args_cli.shield == "on")
     scene_name = scene.get("name", Path(args_cli.scene_json).stem) if scene else "training_maze"
     num_waypoints = max(int(env._path.shape[0]) - 1, 1)
     max_len = int(env.max_episode_length)

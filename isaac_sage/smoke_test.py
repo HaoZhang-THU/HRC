@@ -215,7 +215,7 @@ def main():
     check(stats0["talo_lambda"] == 0.0 and all(torch.allclose(f, g) for f, g in zip(field0, team_grads0)),
           "TALO disabled returns g_team")
 
-    for variant in ("tree", "tree_cbf", "sail", "talo", "sage"):
+    for variant in ("happo_tree", "happo_tree_cbf", "sail", "talo", "sage"):
         env = PlanarFormationEnv()
         cfg = SAGEConfig(variant=variant, tree_depth=3, num_steps=20, ppo_epochs=2, num_minibatches=4,
                          safety=SafetyConfig(activation_distance=3.0, max_rows=24))
@@ -234,7 +234,7 @@ def main():
             torch.save(trainer.checkpoint(), "/tmp/_sage_team_critic_ck.pt")
 
     from isaac_sage.critic import JointCritic
-    cfg = SAGEConfig(variant="tree_cbf", tree_depth=3, num_steps=20, ppo_epochs=2, num_minibatches=4,
+    cfg = SAGEConfig(variant="happo_tree_cbf", tree_depth=3, num_steps=20, ppo_epochs=2, num_minibatches=4,
                      critic_warmup_iters=2, safety=SafetyConfig(activation_distance=3.0, max_rows=24))
     joint_trainer = SAGETrainer(PlanarFormationEnv(), cfg, DEV)
     joint_trainer.load("/tmp/_sage_team_critic_ck.pt")
@@ -255,9 +255,9 @@ def main():
         f"HAPPO critic, no team context; actor frozen for {cfg.critic_warmup_iters} warm-up iterations "
         f"(actor moved {moved}, value loss {value_losses})",
     )
-    torch.save(joint_trainer.checkpoint(), "/tmp/_tree_cbf_joint_ck.pt")
+    torch.save(joint_trainer.checkpoint(), "/tmp/_happo_tree_cbf_joint_ck.pt")
     resumed_trainer = SAGETrainer(PlanarFormationEnv(), cfg, DEV)
-    resumed_trainer.load("/tmp/_tree_cbf_joint_ck.pt", restore_progress=True)
+    resumed_trainer.load("/tmp/_happo_tree_cbf_joint_ck.pt", restore_progress=True)
     check(
         resumed_trainer._critic_warmup_left == 0
         and torch.equal(resumed_trainer.value_norm.running_mean, joint_trainer.value_norm.running_mean),

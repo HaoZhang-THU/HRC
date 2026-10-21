@@ -59,7 +59,7 @@ bash install.sh                    # conda env + pinned packages + pinned Isaac 
 conda activate isaac_sage
 export OMNI_KIT_ACCEPT_EULA=YES    # after reading the NVIDIA Omniverse EULA
 bash train.sh sage                 # one arm (200 iterations)
-bash train.sh all                  # tree, tree_cbf, sail, talo, sage, one after another
+bash train.sh all                  # happo_tree, happo_tree_cbf, sail, talo, sage, one after another
 SCENE=<name> bash train.sh all     # the same five arms on another scene
 bash eval.sh results/<scene>_sage_seed1_<date>   # deployment evaluation of models/iter_200.pt
 ```
@@ -144,8 +144,8 @@ All arms share every setting except the three columns below.
 
 | Arm | `--variant` | Safety layer | Actor update | Critic |
 |---|---|---|---|---|
-| tree | `tree` | none | HAPPO (`--actor_update happo`) | joint-observation (`auto`) |
-| tree_cbf | `tree_cbf` | CBF-QP | HAPPO (`--actor_update happo`) | joint-observation (`auto`) |
+| happo_tree | `happo_tree` | none | HAPPO (`--actor_update happo`) | joint-observation (`auto`) |
+| happo_tree_cbf | `happo_tree_cbf` | CBF-QP | HAPPO (`--actor_update happo`) | joint-observation (`auto`) |
 | SAIL | `sail` | CBF-QP + SAIL | HAPPO (`--actor_update happo`) | joint-observation (`--critic joint`) |
 | TALO | `talo` | CBF-QP + TALO | g_TALO (flag not passed) | team-context (`auto`) |
 | SAGE | `sage` | CBF-QP + SAIL + TALO | g_TALO (flag not passed) | team-context (`auto`) |

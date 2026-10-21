@@ -67,5 +67,5 @@ Setup done.  Before the first run, read the NVIDIA Omniverse EULA and accept it 
     export OMNI_KIT_ACCEPT_EULA=YES
 Then train with
     conda activate $ENV_NAME
-    bash train.sh sage          # or tree / tree_cbf / sail / talo / all
+    bash train.sh sage          # or happo_tree / happo_tree_cbf / sail / talo / all
 EOF
