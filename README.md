@@ -1,63 +1,42 @@
 # HRC: Human–Robot Collaboration
 
-**HRC** brings together our work on human–robot collaboration, led by
-**HALO (ICML 2026 Oral)** and complemented by **SAGE**. The two papers share
-the underlying simulation and control codebase.
+**HRC** brings together **HALO** and **SAGE**, which share the underlying
+simulation and control codebase for human–robot collaboration.
 
-## HALO · ICML 2026 Oral
+## Papers
 
-**Learning Human-Robot Collaboration via Heterogeneous-Agent Lyapunov Policy Optimization**
+| Paper | Publication | Resources |
+|---|---|---|
+| **HALO** · Learning Human-Robot Collaboration via Heterogeneous-Agent Lyapunov Policy Optimization | ICML 2026 Oral | [arXiv](https://arxiv.org/abs/2603.03741) · [PDF](https://arxiv.org/pdf/2603.03741) · [Project](https://haozhang-thu.github.io/HALO/) |
+| **SAGE** · Safety-Aligned Gradient Enforcement for Human–Robot Collaboration | Preprint | [arXiv](https://arxiv.org/abs/2609.21130) · [PDF](https://arxiv.org/pdf/2609.21130) · [Project](https://yisen03-explosion.github.io/sage/) |
 
-<p align="center">
-  <a href="https://haozhang-thu.github.io/HALO/"><img src="https://img.shields.io/badge/ICML_2026-Oral-f2be4d.svg" alt="HALO: ICML 2026 Oral"></a>
-  <a href="https://arxiv.org/abs/2603.03741"><img src="https://img.shields.io/badge/arXiv-2603.03741-b31b1b.svg" alt="HALO arXiv"></a>
-  <a href="https://arxiv.org/pdf/2603.03741"><img src="https://img.shields.io/badge/Paper-PDF-blue.svg" alt="HALO paper PDF"></a>
-  <a href="https://haozhang-thu.github.io/HALO/"><img src="https://img.shields.io/badge/Project-HALO-2d9d79.svg" alt="HALO project page"></a>
-</p>
+## Demos
 
-<!-- Preview from HALO/static/videos/final_teaser.mp4, source excerpts 1–5 s,
-     18–22 s and 48–52 s. Source timing and on-video speed labels are retained. -->
-<p align="center">
-  <a href="https://haozhang-thu.github.io/HALO/static/videos/final_teaser.mp4">
-    <img src="docs/media/halo_teaser.gif" width="100%" alt="HALO: real-world human–robot collaboration, from the ICML 2026 Oral project teaser">
-  </a><br>
-  <sub><b>HALO:</b> Real-world human–robot collaboration. Selected excerpts from the original project teaser.</sub><br>
-  <a href="https://haozhang-thu.github.io/HALO/static/videos/final_teaser.mp4">Watch the full HALO teaser</a>
-</p>
-
-HALO uses Lyapunov-based gradient corrections to stabilize learning among
-heterogeneous agents, supporting collaboration between humans and humanoid robots.
-
-### SAGE · Companion work (preprint)
-
-**Safety-Aligned Gradient Enforcement for Human–Robot Collaboration**
-
-[arXiv](https://arxiv.org/abs/2609.21130) · [PDF](https://arxiv.org/pdf/2609.21130) · [Project page](https://yisen03-explosion.github.io/sage/)
-
+<!-- HALO preview: final_teaser.mp4, source excerpts 1–5 s, 18–22 s and 48–52 s.
+     SAGE simulation: maze_audit.mp4, Figure 6 on the project page, full sequence.
+     Both previews retain source playback speed and on-video speed labels. -->
 <table>
   <tr>
-    <td align="center" width="50%">
-      <img src="docs/media/scenario1_three_carrier.gif" width="100%"><br>
-      <sub><b>Scenario 1:</b> Three-carrier physical collaboration — two Unitree G1 humanoids + one human partner</sub>
+    <td align="center" valign="top" width="25%">
+      <a href="https://haozhang-thu.github.io/HALO/static/videos/final_teaser.mp4"><img src="docs/media/halo_teaser.gif" width="180" alt="HALO: real-world human–robot collaboration"></a><br>
+      <sub><b>HALO:</b> Real-world human–robot collaboration. Selected excerpts from the original project teaser.</sub>
     </td>
-    <td align="center" width="50%">
-      <img src="docs/media/scenario2_confined_transport.gif" width="100%"><br>
-      <sub><b>Scenario 2:</b> Spatially confined transport — octagonal table and human-partner variation</sub>
+    <td align="center" valign="top" width="25%">
+      <a href="docs/media/scenario1_three_carrier.gif"><img src="docs/media/scenario1_three_carrier.gif" width="180" alt="SAGE Scenario 1: two Unitree G1 humanoids and one human partner"></a><br>
+      <sub><b>SAGE · Scenario 1:</b> Three-carrier physical collaboration — two Unitree G1 humanoids + one human partner</sub>
+    </td>
+    <td align="center" valign="top" width="25%">
+      <a href="docs/media/scenario2_confined_transport.gif"><img src="docs/media/scenario2_confined_transport.gif" width="180" alt="SAGE Scenario 2: spatially confined transport"></a><br>
+      <sub><b>SAGE · Scenario 2:</b> Spatially confined transport — octagonal table and human-partner variation</sub>
+    </td>
+    <td align="center" valign="top" width="25%">
+      <a href="https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4"><img src="docs/media/sage_simulation.gif" width="180" alt="SAGE simulation: cooperative board transport in the Isaac Lab Maze"></a><br>
+      <sub><b>SAGE · Simulation:</b> Cooperative transport in the Isaac Lab Maze, with trajectory and hard-tree decision traces. Source video at 10× speed.</sub>
     </td>
   </tr>
 </table>
 
-<!-- SAGE simulation preview from the project page's Figure 6:
-     https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4.
-     Full source sequence; playback speed and the source's 10X label are retained. -->
-<p align="center">
-  <a href="https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4">
-    <img src="docs/media/sage_simulation.gif" width="720" alt="SAGE simulation: cooperative board transport through an Isaac Lab maze, with trajectory and decision-tree overlays">
-  </a><br>
-  <sub><b>SAGE simulation:</b> Cooperative transport in the Isaac Lab Maze, with trajectory and hard-tree decision traces. The source video is shown at 10× speed.</sub><br>
-  <a href="https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4">Watch the full Maze evaluation</a> ·
-  <a href="https://yisen03-explosion.github.io/sage/static/videos/sim_environments.mp4">More simulation environments</a>
-</p>
+Full videos: [HALO teaser](https://haozhang-thu.github.io/HALO/static/videos/final_teaser.mp4) · [SAGE Maze evaluation](https://yisen03-explosion.github.io/sage/static/videos/maze_audit.mp4) · [SAGE simulation environments](https://yisen03-explosion.github.io/sage/static/videos/sim_environments.mp4).
 
 The implementation details and training recipe below describe the **SAGE**
 configuration of this shared codebase.
