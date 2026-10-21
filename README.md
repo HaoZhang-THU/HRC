@@ -1,7 +1,7 @@
-# HRC: Human–Robot Collaboration
+# SafeHRC: Learning Safe Human–Robot Collaboration
 
-**HRC** brings together **HALO** and **SAGE**, which share the underlying
-simulation and control codebase for human–robot collaboration.
+Shared open-source code for **HALO** and **SAGE**, supporting research
+on safe and stable human–robot collaboration.
 
 ## Papers
 
